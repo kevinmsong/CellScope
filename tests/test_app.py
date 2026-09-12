@@ -603,3 +603,14 @@ def test_theme_has_distinct_dark_surfaces():
     assert theme.body_background_fill != theme.body_background_fill_dark
     assert theme.body_text_color != theme.body_text_color_dark
     assert "--cs-surface:#111827" in CSS
+
+
+def test_reference_calibration_accepts_800x600_ruler_for_800x800_sample():
+    batch = BatchSession()
+    session = AnalysisSession()
+    session.image = _record("1.jpg", height=800, width=800)
+    session.reference_image = _record("20x ruler.jpg", height=600, width=800)
+    batch.add(session)
+    cellscope_app.on_apply_reference(200, 100, "This image only", batch)
+    assert session.calibration.scales == (0.5, 0.5)
+    assert session.calibration.method == "reference_scale_bar"

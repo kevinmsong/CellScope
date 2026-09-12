@@ -29,7 +29,6 @@ from src.batch import (
     pooled_clusters,
 )
 from src.calibration import (
-    ReferenceMismatch,
     calibration_from_reference_bar,
     calibration_from_resolution,
     calibration_from_scale_bar,
@@ -667,7 +666,7 @@ def on_apply_reference(bar_length_px, known_length_um, scope, batch):
             session.image,
             session.reference_detection.describe() if session.reference_detection else None,
         )
-    except (ReferenceMismatch, Exception) as exc:
+    except Exception as exc:
         return _calibrated(batch, _error(exc))
     return _calibrated(batch, _apply_calibration(batch, calibration, scope))
 
@@ -1467,8 +1466,9 @@ def build_interface():
 
                     with gr.Group(visible=False) as group_reference:
                         gr.Markdown(
-                            "For microscopes that export the bar in its own frame. Must "
-                            "match the image's pixel dimensions, which is checked.",
+                            "Enter the ruler's known length in µm and confirm its measured pixel length. "
+                            "Different image dimensions or crops are allowed. Use a reference with "
+                            "the same magnification and pixel scaling as the sample.",
                             elem_classes="cs-note",
                         )
                         with gr.Row():

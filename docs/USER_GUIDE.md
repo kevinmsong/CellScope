@@ -20,6 +20,18 @@ the last autosave can be lost if the browser/server terminates; save manually at
 important checkpoints. Undo history is intentionally session-only; the applied
 edits and audit history survive saving and reopening.
 
+## Calibrating from a separate ruler
+
+Enter the ruler's measured length in pixels and the physical length it represents
+in µm. The conversion is `µm per pixel = known µm / measured ruler pixels`.
+An 800x600 reference can calibrate an 800x800 sample: image width/height and crop
+size do not change that ratio. Both dimensions are retained in calibration metadata.
+
+The reference must still have the same magnification and pixel scaling as the
+sample. Entering the ruler's µm length does not compensate for independently
+resizing one image or changing camera binning. Use a matching reference or enter
+the sample's known resolution directly in those cases.
+
 ## Reviewing cells
 
 The default click action toggles inclusion. Excluded cells remain outlined in

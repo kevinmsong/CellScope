@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from src.calibration import (
-    ReferenceMismatch,
     calibration_from_reference_bar,
     check_reference_compatible,
 )
@@ -84,15 +83,15 @@ def test_forty_x_is_exactly_twice_twenty_x():
     assert twenty / forty == pytest.approx(2.0)
 
 
-def test_mismatched_dimensions_are_refused():
-    """A scale measured on a differently sized frame does not transfer."""
-    with pytest.raises(ReferenceMismatch, match="does not transfer"):
-        check_reference_compatible(record(1024, 1024), record(800, 600, "sample.jpg"))
-
-    with pytest.raises(ReferenceMismatch):
-        calibration_from_reference_bar(
-            111.0, 50.0, record(1024, 1024), record(800, 600, "sample.jpg")
-        )
+@pytest.mark.parametrize("reference_size,sample_size", [((800, 600), (800, 800)), ((1024, 1024), (800, 600))])
+def test_different_crop_dimensions_preserve_reference_pixel_scale(reference_size, sample_size):
+    reference = record(*reference_size)
+    sample = record(*sample_size, "sample.jpg")
+    check_reference_compatible(reference, sample)
+    calibration = calibration_from_reference_bar(111.0, 100.0, reference, sample)
+    assert calibration.scales == pytest.approx((100 / 111, 100 / 111))
+    assert calibration.params["reference_dimensions"] == list(reference_size)
+    assert calibration.params["sample_dimensions"] == list(sample_size)
 
 
 def test_matching_dimensions_are_accepted():
@@ -115,7 +114,7 @@ def test_reference_identity_is_recorded_for_provenance():
     assert calibration.params["bar_length_px"] == pytest.approx(111.0)
 
 
-@pytest.mark.parametrize("bad", [0, -1, None])
+@pytest.mark.parametrize("bad", [0, -1, None, float("nan"), float("inf")])
 def test_non_positive_inputs_are_rejected(bad):
     with pytest.raises(ValueError):
         calibration_from_reference_bar(bad, 50.0)

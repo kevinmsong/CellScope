@@ -48,7 +48,7 @@ def calculate_scale(p1: Point, p2: Point, known_length_um: float) -> float:
 
     ``µm_per_pixel = known_length_um / measured_length_pixels``
     """
-    if known_length_um is None or float(known_length_um) <= 0:
+    if known_length_um is None or not math.isfinite(float(known_length_um)) or float(known_length_um) <= 0:
         raise ValueError(
             f"Scale-bar length must be a positive number of µm, got {known_length_um!r}."
         )
@@ -145,22 +145,15 @@ class ReferenceMismatch(ValueError):
 
 
 def check_reference_compatible(reference: ImageRecord, sample: ImageRecord) -> None:
-    """Refuse to transfer a scale between images of different pixel dimensions.
+    """Validate usable frames without treating crop dimensions as pixel scale.
 
-    Microscope software often exports the scale bar in a separate frame at the
-    same magnification. µm/px then transfers -- but only if both frames came off
-    the same sensor at the same resolution. Matching pixel dimensions is a
-    necessary condition and the only one we can actually verify, so it is
-    enforced; the researcher remains responsible for the magnification matching.
+    Different widths/heights are compatible with the same physical pixel size.
+    Equal dimensions do not prove matching magnification or export scaling;
+    the researcher supplies a reference with the appropriate pixel scale.
     """
-    if (reference.height, reference.width) != (sample.height, sample.width):
-        raise ReferenceMismatch(
-            f"Reference image {reference.filename} is "
-            f"{reference.width}x{reference.height} px but the sample "
-            f"{sample.filename} is {sample.width}x{sample.height} px. "
-            "A scale measured on a differently sized frame does not transfer. "
-            "Use a reference captured at the same magnification and resolution."
-        )
+    for image in (reference, sample):
+        if image.width <= 0 or image.height <= 0:
+            raise ReferenceMismatch("Reference and sample dimensions must be positive.")
 
 
 def calibration_from_reference_bar(
@@ -177,11 +170,11 @@ def calibration_from_reference_bar(
     hash are recorded so the calibration remains traceable to the exact frame it
     came from (§18).
     """
-    if bar_length_px is None or float(bar_length_px) <= 0:
+    if bar_length_px is None or not math.isfinite(float(bar_length_px)) or float(bar_length_px) <= 0:
         raise ValueError(
             f"Scale-bar length must be a positive number of pixels, got {bar_length_px!r}."
         )
-    if known_length_um is None or float(known_length_um) <= 0:
+    if known_length_um is None or not math.isfinite(float(known_length_um)) or float(known_length_um) <= 0:
         raise ValueError(
             f"Scale-bar physical length must be positive, got {known_length_um!r}."
         )
@@ -198,6 +191,9 @@ def calibration_from_reference_bar(
         params["reference_filename"] = reference.filename
         params["reference_sha256"] = reference.sha256
         params["reference_dimensions"] = [reference.width, reference.height]
+    if sample is not None:
+        params["sample_dimensions"] = [sample.width, sample.height]
+    params["transfer_basis"] = "known bar length; matching magnification and pixel scaling supplied by user"
     if detection is not None:
         params["detection"] = detection
 
