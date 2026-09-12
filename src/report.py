@@ -1,0 +1,103 @@
+"""Readable PDF reports generated from current, QC-approved results."""
+from io import BytesIO
+import pandas as pd
+from xml.sax.saxutils import escape
+from PIL import Image as PILImage
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+from . import __version__
+from .pipeline import compute_results
+from .quality import readiness, experimental_summary
+from .visualize import make_overlay
+from .image_io import make_display
+
+
+def write_report(batch, path):
+    styles = getSampleStyleSheet()
+    story = []
+    def paragraph(text, style="BodyText"):
+        story.append(Paragraph(escape(str(text)), styles[style]))
+        story.append(Spacer(1, 7))
+    def table(frame):
+        if frame.empty:
+            paragraph("No data available.")
+            return
+        labels = {"biological_replicates": "Biological replicates", "sd_between_replicates": "Between-replicate SD",
+                  "nuclei_included": "Included nuclei", "touching_nuclei": "Touching nuclei",
+                  "touching_groups": "Touching groups", "nuclei_excluded": "Excluded nuclei"}
+        data = [[Paragraph(escape(labels.get(str(c), str(c).replace("_", " ").capitalize())), styles["BodyText"]) for c in frame.columns]]
+        data += [[Paragraph(escape("NA" if pd.isna(v) else str(v)), styles["BodyText"]) for v in row] for row in frame.itertuples(index=False, name=None)]
+        t = Table(data, repeatRows=1, hAlign="LEFT", colWidths=[468 / len(frame.columns)] * len(frame.columns))
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9F5ED")),
+                               ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                               ("LINEBELOW", (0, 0), (-1, -1), .3, colors.lightgrey),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+    paragraph("CellScope analysis report", "Title")
+    paragraph(batch.label or "Untitled experiment", "Heading2")
+    paragraph(f"Software {__version__} | Batch {batch.batch_id}")
+    paragraph("Readiness checks", "Heading2")
+    table(readiness(batch))
+    paragraph("Experimental comparisons", "Heading2")
+    paragraph("Fields are pooled within a well; wells are averaged within each biological replicate. Condition means and standard deviations use replicate means, not individual cells. Missing design labels are omitted. No p-values are calculated.")
+    table(experimental_summary(batch)[2].round(3))
+    from .nuclei import batch_nuclear_counts
+    paragraph("Independent DAPI nuclei counts", "Heading2")
+    nuclei = batch_nuclear_counts(batch)
+    if not nuclei.empty:
+        table(nuclei[["image", "nuclei_included", "touching_nuclei", "touching_groups", "nuclei_excluded"]])
+    else:
+        paragraph("DAPI analysis has not been run.")
+    paragraph("Touching means direct mask contact, including shared corners. Nuclear counts are separate segmentation estimates and are not cell counts.")
+    for s in batch.images:
+        story.append(PageBreak())
+        paragraph(s.display_name, "Heading1")
+        paragraph(f"Well: {s.well or 'unset'} | Condition: {s.condition or 'unset'} | Biological replicate: {s.replicate or 'unset'}")
+        paragraph(f"Calibration: {s.calibration.summary()} | Reviewed: {s.reviewed}")
+        paragraph("Review note: " + (s.review_note or "None"))
+        if not s.has_segmentation:
+            paragraph("No segmentation results.")
+            continue
+        results = compute_results(s)
+        paragraph(f"Accepted cells: {results.counts['cells_accepted']} | Excluded objects: {results.counts['objects_excluded']} | Unresolved objects: {results.counts['unresolved_accepted']}")
+        display, _ = make_display(s.image)
+        overlay = make_overlay(display, results.qc_labels, results.objects, results.clusters)
+        buffer = BytesIO()
+        PILImage.fromarray(overlay).save(buffer, format="PNG")
+        buffer.seek(0)
+        ratio = min(468 / overlay.shape[1], 190 / overlay.shape[0])
+        story.append(Image(buffer, width=overlay.shape[1] * ratio, height=overlay.shape[0] * ratio))
+        paragraph("Blue: isolated cell. Orange: clustered cell. Aqua: unresolved group. IDs link the overlay to CSV measurements.")
+        paragraph("Accepted-cell measurements", "Heading2")
+        units = "um" if s.calibration.is_calibrated else "px"
+        metrics = ["area_" + units + "2", "major_axis_" + units, "minor_axis_" + units,
+                   "aspect_ratio", "circularity", "solidity"]
+        table(pd.DataFrame([{"Metric": name.replace("_", " "),
+                             "Mean": round(float(results.cells[name].mean()), 3),
+                             "Median": round(float(results.cells[name].median()), 3)}
+                            for name in metrics if name in results.cells]))
+        paragraph("Measurement definitions", "Heading2")
+        paragraph("Area is mask pixel count scaled by pixel area. Major/minor axes are equivalent-ellipse axes. Feret max is maximum caliper diameter. Aspect ratio is major/minor axis; circularity is 4*pi*area/perimeter squared; solidity is area/convex area. Physical lengths use um and areas use um2; uncalibrated data use px and px2.")
+        story.append(PageBreak())
+        paragraph("Methods and QC: " + s.display_name, "Heading1")
+        paragraph("Recorded settings", "Heading2")
+        if s.nuclei_settings:
+            paragraph("Independent nuclear settings: " + str(s.nuclei_settings))
+        for name in ("preprocess_params", "segmentation_params", "split_params", "cluster_params"):
+            paragraph(name + ": " + str(getattr(s, name).describe()))
+        paragraph("QC history", "Heading2")
+        if not s.qc.log and not s.edit_log:
+            paragraph("No manual corrections or exclusions recorded.")
+        for entry in s.qc.log:
+            paragraph(f"{entry.timestamp}: {entry.action} object {entry.object_id}: {entry.reason}")
+        for entry in s.edit_log:
+            paragraph(str(entry))
+    def footer(canvas, doc):
+        canvas.setFont("Helvetica", 8)
+        canvas.drawString(72, 30, "CellScope | Descriptive analysis | " + str(doc.page))
+    SimpleDocTemplate(str(path), pagesize=(612, 792), rightMargin=72, leftMargin=72,
+                      topMargin=48, bottomMargin=48).build(story, onFirstPage=footer, onLaterPages=footer)
+    return str(path)

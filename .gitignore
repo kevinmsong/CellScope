@@ -1,0 +1,54 @@
+# Environments
+.venv/
+venv/
+env/
+
+# Unpublished lab data — never commit microscopy images to this repo.
+data/
+*.lif
+*.nd2
+*.czi
+
+# Analysis outputs
+*.zip
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Cellpose model weights cache
+.cellpose/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Lab images live here for local testing; they are not part of the repo.
+images/
+
+# Local projects, previews, logs and generated reports
+projects/
+*.cellscope
+output/
+tmp/
+.playwright-cli/
+.ruff_cache/
+# Source microscopy and reference image files must never be committed.
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.gif
+*.webp
+*.npy
+*.npz
+*.pdf

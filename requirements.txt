@@ -1,0 +1,24 @@
+# CellScope MVP dependencies
+#
+# numpy is pinned <2 because the surrounding scientific stack on this machine
+# (torch 2.5.1+cu124, numba 0.60, scipy 1.11) is built against the 1.26 ABI.
+#
+# cellpose 4.x (Cellpose-SAM) is a breaking change from 3.x: models.Cellpose and
+# SizeModel were removed, leaving only CellposeModel, and eval() requires
+# 3-channel input. src/segmentation.py adapts to both, but 4.x is the target.
+#
+# gradio is pinned <6 for a stable Blocks / State / SelectData API.
+
+gradio>=5.30,<6
+cellpose>=4.0,<5
+scikit-image>=0.24
+numpy>=1.26,<2
+pandas>=2.0
+scipy>=1.11
+Pillow>=10
+plotly>=5.20
+tifffile>=2024.1
+pytest>=7.4
+
+# PDF analysis reports
+reportlab>=4.0,<5

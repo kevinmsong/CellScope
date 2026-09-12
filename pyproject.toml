@@ -1,0 +1,22 @@
+[project]
+name = "cellscope"
+version = "0.1.0"
+description = "Research-grade fluorescence cell morphometry with explicit single-cell vs. cluster resolution"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# Put the project root on sys.path so tests can `from src import ...`
+pythonpath = ["."]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# The project deliberately uses str.format in most modules and f-strings in a
+# few; each file is internally consistent, which is what matters for reading.
+# Broad `except Exception` in app.py is intentional: a Gradio callback must
+# surface an error to the user rather than die silently, and each one reports
+# the exception it caught.
+ignore = ["UP032", "C408", "RUF059", "BLE001", "UP035", "RUF046", "PLR0402", "B008"]

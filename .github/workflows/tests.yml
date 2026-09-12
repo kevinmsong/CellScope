@@ -1,0 +1,19 @@
+name: Tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install CPU test dependencies
+        run: >-
+          python -m pip install "numpy>=1.26,<2" "gradio>=5.30,<6"
+          "scikit-image>=0.24" pandas scipy Pillow plotly tifffile reportlab pytest
+      - name: Test
+        run: python -m pytest -q
