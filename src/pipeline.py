@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -53,16 +54,19 @@ def run_segmentation(
     segmenter without ever being measured: morphology still comes from the
     chosen segmentation channel alone.
     """
+    started = perf_counter()
     prepared = preprocess_image(image_2d, session.preprocess_params)
     prepared_nuclear = (
         preprocess_image(nuclear_2d, session.preprocess_params)
         if nuclear_2d is not None
         else None
     )
+    prepared_at = perf_counter()
     raw_labels, engine_info = segment_cells(
         prepared, session.segmentation_params, engine=engine, nuclear=prepared_nuclear
     )
 
+    segmented_at = perf_counter()
     object_labels, objects = split_touching_cells(
         raw_labels, session.split_params, session.segmentation_params.min_object_area
     )
@@ -72,7 +76,12 @@ def run_segmentation(
     session.raw_labels = raw_labels
     session.object_labels = object_labels
     session.objects = objects
-    session.engine_info = engine_info
+    session.engine_info = {**engine_info, "timings_seconds": {
+        "preprocessing": round(prepared_at - started, 3),
+        "segmentation": round(segmented_at - prepared_at, 3),
+        "splitting": round(perf_counter() - segmented_at, 3),
+        "total": round(perf_counter() - started, 3),
+    }}
     session.qc.reset()
     exclude_border_touching(session.qc, objects, reason="automatically excluded: touches image border")
     session.reviewed = False

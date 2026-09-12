@@ -38,6 +38,8 @@ _MODEL_CACHE: dict[tuple[str, bool], Any] = {}
 
 #: Serialises model construction. See :func:`_get_cellpose_model` for why.
 _MODEL_LOCK = threading.Lock()
+# Gradio workflows share the same GPU. Concurrent inference multiplies VRAM peaks.
+_INFERENCE_LOCK = threading.Lock()
 
 
 #: 8-connected neighbourhood, used to find the interface between fragments.
@@ -147,6 +149,30 @@ def _as_three_channel(image: np.ndarray, nuclear: np.ndarray | None = None) -> n
     return np.stack([image, nuclear, nuclear], axis=-1)
 
 
+
+def _tile_batch_for_memory(free_bytes: int, total_bytes: int) -> int:
+    """Conservative tile batches to avoid Windows shared-memory spill on small GPUs."""
+    gib = 1024**3
+    if total_bytes <= 4.5 * gib or free_bytes < 2 * gib:
+        return 1
+    if total_bytes <= 8 * gib or free_bytes < 4 * gib:
+        return 2
+    if free_bytes < 7 * gib:
+        return 4
+    return 8
+
+
+def _inference_tile_batch(use_gpu: bool) -> int:
+    if not use_gpu:
+        return 1
+    try:
+        import torch
+        return _tile_batch_for_memory(*torch.cuda.mem_get_info())
+    except Exception:
+        # Missing memory telemetry should not select the highest-memory mode.
+        return 1
+
+
 def segment_with_cellpose(image, params, nuclear=None):
     """Run Cellpose and return ``(labels, engine_info)``."""
     if not cellpose_available():
@@ -175,15 +201,12 @@ def segment_with_cellpose(image, params, nuclear=None):
     if params.diameter and params.diameter > 0:
         kwargs["diameter"] = float(params.diameter) * scale
 
-    # Measured on the reference field (NVIDIA T1200, 800x600, ~6.2 s here), so
-    # these are not worth re-trying:
-    #   * a list of images is iterated internally -- 0.98x for 2, 0.96x for 4;
-    #   * bsize must be 256, other values raise ValueError;
-    #   * niter changes nothing (6.38 s default vs 6.34 s at 100);
-    #   * use_bfloat16=False is 2.6x SLOWER despite Turing lacking native bf16.
-    # Peak GPU memory is 1.84 GB of 4.3: the card is compute-bound, not
-    # memory-bound. Downscaling is the only lever that moves this number.
-    result = model.eval(stack, **kwargs)
+    # Tile batch size changes memory concurrency, not image resolution or weights.
+    # The previous implicit default (8) spilled ~1.35 GiB into shared system RAM
+    # on the 4 GiB T1200 under desktop load, causing minute-long inference.
+    with _INFERENCE_LOCK:
+        tile_batch = _inference_tile_batch(use_gpu)
+        result = model.eval(stack, batch_size=tile_batch, **kwargs)
     masks = np.asarray(result[0]).astype(np.int32)
 
     if scale < 1.0:
@@ -194,6 +217,7 @@ def segment_with_cellpose(image, params, nuclear=None):
         "cellpose_version": cellpose_version(),
         "model": params.model,
         "device": "cuda" if use_gpu else "cpu",
+        "tile_batch_size": tile_batch,
         "nuclear_channel": params.nuclear_channel if nuclear is not None else None,
         "analysis_scale": scale,
         "parameters": params.describe(),

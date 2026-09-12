@@ -27,7 +27,7 @@ def recovery_path(batch):
 def autosave(batch):
     if batch is None or batch.is_empty:
         return "Autosave: no images loaded."
-    path = save_project(batch, recovery_path(batch))
+    path = save_project(batch, recovery_path(batch), compression_level=1)
     return "Autosaved " + time.strftime("%H:%M:%S") + " — " + Path(path).name
 
 

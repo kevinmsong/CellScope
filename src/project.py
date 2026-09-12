@@ -16,14 +16,14 @@ REGISTRY = {name: cls for name, cls in vars(types).items()
 SKIP = {"results_cache", "reference_detection", "undo_stack", "redo_stack"}
 
 
-def save_project(batch, path):
+def save_project(batch, path, *, compression_level=6):
     """Atomically save without modifying the last good project on failure."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     os.close(fd)
     try:
-        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=compression_level) as archive:
             counter = 0
             def encode(value):
                 nonlocal counter

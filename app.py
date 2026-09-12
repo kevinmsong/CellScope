@@ -793,7 +793,14 @@ def _segment_views(batch, message):
 def _describe_run(session):
     results = compute_results(session)
     unresolved = [o for o in results.objects if not o.is_resolved]
+    timing = session.engine_info.get("timings_seconds", {})
     note = ""
+    if timing:
+        note += "\n\nProcessing: **{:.1f}s** (segmentation {:.1f}s; splitting {:.1f}s).".format(
+            timing["total"], timing["segmentation"], timing["splitting"])
+    if session.engine_info.get("device"):
+        note += " Device: **{}**; tile batch: **{}**.".format(
+            session.engine_info["device"], session.engine_info.get("tile_batch_size", "default"))
     if session.engine_info.get("cellpose_error"):
         note += "\n\n**Cellpose failed and the fallback ran instead:** `{}`".format(
             session.engine_info["cellpose_error"]

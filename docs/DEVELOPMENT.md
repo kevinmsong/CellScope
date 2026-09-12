@@ -57,3 +57,14 @@ Nuclear segmentation is an Otsu/watershed estimate with manually tunable paramet
 
 Never stage image data, `projects/`, `output/`, model weights or credentials.
 Review `git diff --cached --stat` and the staged filenames before publishing.
+
+## GPU memory and performance
+
+Cellpose inference is serialized across app workflows. On GPUs with 4 GiB VRAM,
+one tile is processed at a time; larger devices select 2/4/8 using available
+memory. This avoids the Windows GPU shared-memory fallback that can make an
+otherwise small image take minutes. Tile batching does not resize the image or
+change model weights. Floating-point results can vary slightly with batch size.
+The chosen tile batch, device, and pipeline stage timings are exported in metadata
+and shown after segmentation. Model loading is included in the segmentation time.
+Autosaves use faster ZIP compression than manual project downloads.
