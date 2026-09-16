@@ -1,8 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cellscope"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Research-grade fluorescence cell morphometry with explicit single-cell vs. cluster resolution"
+readme = "README.md"
 requires-python = ">=3.10"
+# Upper bounds are the majors CellScope is tested against: numpy 2 changes the
+# ABI of the scientific stack in use, and Gradio 6 changes the Blocks API.
+dependencies = [
+    "gradio>=5.30,<6",
+    "numpy>=1.26,<2",
+    "scipy>=1.11",
+    "scikit-image>=0.24",
+    "pandas>=2.0",
+    "Pillow>=10",
+    "plotly>=5.20",
+    "tifffile>=2024.1",
+    "reportlab>=4.0,<5",
+]
+
+[project.optional-dependencies]
+# Cellpose 4 (Cellpose-SAM). It pulls in PyTorch; for a GPU, install the CUDA
+# build of PyTorch first (see README), then this extra.
+cellpose = ["cellpose>=4.0,<5"]
+bench = ["psutil>=5.9"]
+dev = ["pytest>=7.4", "ruff>=0.5", "psutil>=5.9", "playwright>=1.40"]
+
+[project.scripts]
+cellscope = "cellscope.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "src.__version__" }
+
+[tool.setuptools.packages.find]
+# ``src`` is the scientific package (it predates packaging; the name is kept so
+# existing scripts and projects keep working). ``cellscope`` is the interface.
+include = ["src", "cellscope", "cellscope.*"]
 
 [tool.pytest.ini_options]
 # Put the project root on sys.path so tests can `from src import ...`
@@ -16,7 +52,11 @@ line-length = 100
 [tool.ruff.lint]
 # The project deliberately uses str.format in most modules and f-strings in a
 # few; each file is internally consistent, which is what matters for reading.
-# Broad `except Exception` in app.py is intentional: a Gradio callback must
+# Broad `except Exception` in interface callbacks is intentional: a callback must
 # surface an error to the user rather than die silently, and each one reports
 # the exception it caught.
 ignore = ["UP032", "C408", "RUF059", "BLE001", "UP035", "RUF046", "PLR0402", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# Frozen copies of earlier implementations: kept verbatim on purpose.
+"tests/reference_impl.py" = ["ALL"]

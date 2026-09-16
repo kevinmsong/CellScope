@@ -1,139 +1,224 @@
 # User guide
 
-## Projects and recovery
+The workflow bar at the top of every page shows six steps. Each step is marked
+done (✓), current, needing attention (!), a problem (✕) or optional, and the
+*Next* line says what to do next.
 
-**Save project** writes an atomic local recovery file and offers a download. The
-portable file contains the original images, nuclear/reference files, masks,
-calibration, channels, parameters, exclusions, review notes, design labels and
-nuclear analysis. It can be opened on another installation of the same version.
+## 1. Import and calibrate
 
-Autosave runs every 60 seconds while the browser is connected and after each
-completed image in a normal batch or resumed run. The local `projects/` directory
-survives an app restart. Use **Refresh recovery list**, select a file, then
-**Recover selected autosave**. Recovery names are stable project identifiers;
-open one to see the experiment and images. Saving or opening another project
-preserves the current nonempty project first.
+**Adding images.** Add JPEG, PNG or TIFF files; you can add more later. Images
+are recognised by content, so the same file added twice is skipped, while two
+different files that happen to share a name are both kept.
 
-An interrupted inference is not resumable halfway through a single image. Resume
-skips completed images and retries pending or failed images. Changes made since
-the last autosave can be lost if the browser/server terminates; save manually at
-important checkpoints. Undo history is intentionally session-only; the applied
-edits and audit history survive saving and reopening.
+**Channels.** Choose the **cell channel** (what is measured) and, optionally, a
+**nuclear guide** channel. The guide helps separate touching cells but is never
+measured. Both settings apply to the whole batch. To override a single image,
+edit its row in the image table. A separate nuclear file can be attached to the
+active image.
 
-## Calibrating from a separate ruler
+**Calibration.** Choose one method:
 
-Enter the ruler's measured length in pixels and the physical length it represents
-in µm. The conversion is `µm per pixel = known µm / measured ruler pixels`.
-An 800x600 reference can calibrate an 800x800 sample: image width/height and crop
-size do not change that ratio. Both dimensions are retained in calibration metadata.
+- **Scale bar in image.** **Detect bar in this image** finds a yellow or white
+  bar drawn on the image. You can also click the bar's two ends. Enter the
+  length the caption states (for example 50 µm) and apply.
+- **Reference frame.** Upload a separate ruler image taken at the same
+  magnification; it may be a different size from the samples. Confirm the
+  detected pixel length and the µm value.
+- **Enter resolution.** Type µm per pixel; X and Y may differ.
+- **Work in pixels.** Confirms that results will be in px and px² only.
 
-The reference must still have the same magnification and pixel scaling as the
-sample. Entering the ruler's µm length does not compensate for independently
-resizing one image or changing camera binning. Use a matching reference or enter
-the sample's known resolution directly in those cases.
+Calibration is never applied silently. A batch that mixes calibrated and
+uncalibrated images is flagged, and its pooled cells are not combined.
 
-## Reviewing cells
+## 2. Segment
 
-The default click action toggles inclusion. Excluded cells remain outlined in
-gray, so click their interior again to restore them. **Inspect** selects a cell
-without changing QC. Its boundary is highlighted in white, and its measurements
-appear below the image. Clicking a row in **Linked cell measurements** selects
-the corresponding object. Excluded-cell measurements are diagnostic only.
+The settings column lists the controls you are most likely to change first.
+Automatic exclusions, speed and hardware, preprocessing and touching-cell
+controls are in the collapsed sections below them.
 
-Open **View and correction tools** to zoom (up to 8x), pan with horizontal/vertical
-position controls, adjust overlay opacity, or show the original image. **Fit image**
-returns to the full field. Zoom enlarges the display preview, not the measurement
-mask; very small structures may need a higher-resolution source/display workflow.
-The image's fullscreen button opens a larger view.
+1. **Preview on this image** segments a copy of the active image. The
+   **Before and after** table compares these values with the image's current
+   segmentation:
+   - objects and accepted cells;
+   - exclusions at the border, at the scale bar, and otherwise;
+   - unresolved groups and multi-cell clusters;
+   - median area;
+   - runtime.
 
-Undo/redo operates on complete exclusion or correction actions, including bulk
-filters. Up to 12 full-mask checkpoints are kept in memory. Ctrl+Z and
-Ctrl+Shift+Z work when the Undo/Redo controls are visible and the focus is outside
-a text input. New edits clear redo history. Re-segmentation starts a new history.
+   Choose **Keep preview** or **Discard preview**. Nothing changes until you keep
+   it. **Segment this image now** runs and keeps the result in one step.
+2. **Use these settings for the batch** makes them the batch defaults *without
+   running anything*. Images already segmented with other settings are marked
+   **stale**, and the note under the settings says how many would change.
+3. **Run batch** segments images that need it: new, failed or stale ones.
+   Choose *All images* to re-run everything; this clears their review.
+   - **Progress** shows each image's state, object count and runtime, along with
+     an estimate of the time left.
+   - **Cancel** lets the image on the GPU finish, then stops; finished images
+     keep their results.
+   - **Retry failed images** runs only the failures.
 
-**Mark reviewed** is available after segmentation. QC edits, corrections and
-re-segmentation clear that status. Changes to calibration, channels, or analysis
-settings invalidate the recorded review signature when status/readiness is
-refreshed. Results remain available, but readiness identifies outstanding review.
+**Automatic exclusions.** After segmentation, two rules run:
+
+- objects touching the **image edge** are excluded;
+- objects touching a **scale bar or caption burned into the image**, or lying
+  within 2 px of it, are excluded.
+
+Only saturated yellow or white bars in the outer quarter of the frame are
+recognised. Objects that are the bar or its lettering are excluded by the same
+rule. So is any cell whose strip was merged into a lettering object. Both rules
+are logged and shown on the overlay. The scale-bar zone has a dotted outline.
+You can switch either rule off, then use **Apply rules to all images**. This
+updates exclusions without re-segmenting and never overrides a cell you
+restored by hand.
+
+**GPU memory.** If the GPU runs out of memory, the image is retried with a
+smaller tile batch, and then on the CPU. The image's badge and the export
+record which happened. With the `auto` engine, CellScope falls back to the
+threshold engine only when Cellpose cannot be loaded at all. Any other Cellpose
+failure is reported as that image's error.
+
+## 3. Review
+
+The viewer runs in the browser, so viewing controls respond immediately:
+
+- **Zoom:** scroll wheel, <kbd>+</kbd>/<kbd>-</kbd>, **Fit** (<kbd>F</kbd>) or
+  **1:1** (<kbd>1</kbd>).
+- **Pan:** drag the image.
+- **Overlay:** adjust its opacity, or press **Original** (<kbd>O</kbd>) to hide
+  it.
+- **Hover:** shows an object's number, whether it is a cell or an unresolved
+  group, whether it is included, its area, and why it was excluded.
+
+The **click mode** decides what a click does:
+
+| Mode | Key | A click… |
+|---|---|---|
+| Toggle inclusion | <kbd>T</kbd> | excludes an included cell or restores an excluded one |
+| Inspect | <kbd>I</kbd> | selects a cell without changing anything |
+| Collect correction points | <kbd>P</kbd> | adds a point for a split or boundary |
+
+**The selected cell.**
+
+- It has a white outline, its values appear under **Selected cell**, and its row
+  is highlighted in **Measurements for this image**.
+- Clicking a row selects that cell, and you can also type its number.
+- <kbd>X</kbd> excludes or restores it.
+- Measurements of excluded cells are diagnostic only.
+
+**Moving between images.** <kbd>←</kbd>/<kbd>→</kbd> move between images, and
+**Next unreviewed** skips images already reviewed. <kbd>R</kbd> marks the image
+reviewed, with an optional note.
+
+**Undo.** <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>
+undo and redo whole actions, including bulk filters. The last 12 are kept for
+each image. Shortcuts are ignored while you type in a text box. Press
+<kbd>?</kbd> for the full list.
+
+**What invalidates a review.** Any exclusion, correction or re-segmentation
+clears the reviewed mark. So does a later change to calibration, channels or
+settings.
 
 ## Correcting segmentation
 
-Corrections edit the working object mask. They never edit the original source
-pixels or raw segmentation mask. Each operation is recorded with time, IDs and
-original-image coordinates.
+Corrections change the working mask only; the source image and the raw
+segmentation are never modified. Each correction is logged with its time, IDs
+and original-image coordinates. The **Cell IDs** box defaults to the selected
+cell.
 
-- **Merge:** enter two or more touching IDs. They must have consistent inclusion
-  status. The merged object keeps the first ID. Review it as one resolved cell.
-- **Split:** enter one ID; choose **Collect correction points** and click two
-  distinct seeds inside it. The split uses watershed on the distance transform.
-  Inspect both resulting boundaries before accepting the result.
-- **Replace boundary:** enter one ID and click at least three polygon vertices in
-  order. The polygon becomes that cell's complete boundary. Overlap with another
-  cell is rejected. This is a polygon replacement, not a freehand brush.
+- **Merge:** two or more touching cells with the same inclusion state. The
+  merged cell keeps the first ID.
+- **Split:** one cell, plus two seed points inside it. The split uses a
+  watershed on the distance transform.
+- **Replace boundary:** one cell, plus three or more polygon vertices in order.
+  Overlapping another cell is refused.
 
-Points are drawn in yellow and also shown as editable JSON. Use **Clear points**
-before another correction. A split child inherits an excluded parent's QC state.
-Undo restores the previous mask and inclusion decisions. Automatic edge exclusion
-runs after segmentation; inspect manual corrections for newly introduced edge
-contacts. **Reset all QC** restores all objects, including edge objects, while
-retaining an audit trail. Re-segmenting reapplies the automatic edge filter.
+An edited cell that now touches the edge or a scale bar is excluded, as it
+would be after segmentation, unless you restored it by hand. A split child
+inherits an excluded parent's state. **Restore all** restores everything,
+including automatic exclusions, and can be undone.
+
+## 4. Design and compare
+
+**Labelling images.** Give every image a **well**, **condition** and
+**biological replicate**, then choose **Save design**. Reuse a replicate label
+for technical wells of the same biological sample. Images missing a label are
+listed and left out of the comparison, never guessed.
+
+**How the comparison is built.** Choose a measurement, such as area, axes,
+Feret diameter, perimeter, aspect ratio, circularity or solidity. Then:
+
+1. Cells from all fields of a well are pooled into a **well** mean.
+2. Wells count equally within a **biological replicate**.
+3. Replicates count equally within a **condition**.
+
+**What each level reports.** Every level shows its own n, mean, median and SD.
+The condition *n* is the number of biological replicates. Calibrated and
+uncalibrated images appear in separate rows. The dot plot shows one point per
+replicate, with a bar at the condition mean.
+
+**Cautions.** A note appears when a condition has fewer than three replicates
+or includes unreviewed images. No significance tests are run: choose a test
+that matches your design, with biological replicates as n.
+
+**Readiness** lists outstanding checks. **Build PDF report** writes the report
+on its own.
+
+## 5. Results
+
+Descriptive summaries and distributions of every accepted cell in the batch,
+pooled. They describe the batch; they are not a between-condition comparison.
+
+## 6. Export
+
+**Build analysis archive** writes `batch_analysis.zip`; see
+[formats](FORMATS.md). The workflow bar marks Export done until something
+changes.
+
+## Projects, autosave and recovery
+
+**Saving.** **Save project** gives you a portable `.cellscope` file and updates
+the local recovery copy. The file holds the images, masks, settings, QC
+decisions, corrections, review notes, design and DAPI analysis.
+
+**Autosave.** Autosave writes in the background whenever something has changed,
+so it never pauses the interface. It checks every 30 seconds by default (see
+`--autosave-interval`) and also after each image in a batch run. Saves are
+atomic, so an interrupted save leaves the previous copy intact.
+
+**Recovery.** **Autosaved projects** lists recovery copies by experiment name,
+size and date. Opening one first saves the project that is currently open.
+Undo history is not saved.
+
+**Older projects.** Projects from CellScope 0.1 open with their results and
+reviews intact. A newer project that this version cannot read is refused with
+a message naming the version that wrote it.
+
+**Presets.** A preset holds the channels and all analysis settings, including
+the automatic exclusion rules, but not the calibration. Applying a preset marks
+affected images stale; it does not re-run them.
 
 ## DAPI nuclei
 
-Choose **Image channel / blue** for a composite RGB image. For a grayscale DAPI
-image, choose grayscale. A separate nuclear file must first be attached on Batch;
-select **Separate nuclear file** and its appropriate channel.
+**Source.** Choose **Image channel / blue** for an RGB composite, or
+**Separate nuclear file** after attaching one on Import.
 
-Nuclear segmentation uses Gaussian smoothing, Otsu thresholding, a minimum area
-filter, and distance-transform watershed. Seed separation controls how many peaks
-are allowed within a connected DAPI region. These are estimates: inspect crowded
-or unevenly stained nuclei carefully, and tune settings to the image resolution.
-This method can over-split or under-split irregular nuclei.
+**Method.** Nuclei are found by Gaussian smoothing, an Otsu threshold, a minimum
+area and a distance-transform watershed. **Seed separation** controls how
+readily touching nuclei are split. These are estimates, so check crowded
+fields.
 
-**Direct contact** includes shared pixel edges and corners. Even a one-pixel
-background gap does not count. The app reports:
+**Direct contact** means the nuclear masks share an edge or a corner; any gap
+disqualifies. The counts are:
 
 | Count | Meaning |
 |---|---|
 | Included nuclei | Segmented nuclei remaining after nuclear QC |
-| Touching nuclei | Included nuclei contacting at least one other included nucleus |
-| Touching groups | Connected components containing at least two nuclei |
-| Isolated nuclei | Included nuclei with no direct nuclear contact |
-| Contact pairs | Unique pairs of directly contacting included nuclei |
+| Touching nuclei | Included nuclei touching at least one other |
+| Touching groups | Connected groups of at least two nuclei |
+| Isolated nuclei | Included nuclei touching none |
+| Contact pairs | Unique touching pairs |
 
-Edge nuclei are excluded automatically. Click a nucleus to exclude/restore it;
-contact groups are recomputed immediately. Nuclear exclusions are independent
-of cell exclusions. **Export nuclear counts and masks** downloads a separate
-archive even when no cytoplasmic cell analysis has been run. Re-running nuclei replaces the previous nuclear masks and
-nuclear QC log. Save a project before a run if you need to preserve both versions.
-
-## Presets and processing
-
-Presets store the batch's applied channel, preprocessing, segmentation, splitting,
-and clustering settings. They exclude calibration, images and QC decisions.
-Download a named JSON preset, then upload and apply it to another batch. Inspect
-the populated Segment controls before running. A setting changed in a widget but
-not applied by running segmentation is not yet part of the batch preset.
-
-**Resume pending images** uses each image's saved settings and skips completed
-images. **Retry failed images** processes failures only. Cancellation stops future
-work; the current inference call may finish first. Completed images are saved.
-Remaining-time estimates extrapolate elapsed time and may be inaccurate during
-model loading or when images differ greatly in size.
-
-## Experimental design and readiness
-
-Refresh readiness before editing design. Each image needs a well, condition and
-biological replicate label to enter experimental comparisons. Use consistent
-labels for fields from the same well and technical wells from the same specimen.
-
-Fields pool within wells, so wells with more fields contribute more cells to that
-well's mean. Each well then has equal weight within its biological replicate;
-each biological replicate has equal weight within a condition. Between-replicate
-SD is NA for a single replicate. Pixel and physical-unit groups stay separate.
-These summaries currently compare cell area; the full cell table provides other
-metrics for additional analyses.
-
-Readiness flags missing segmentation/calibration, unreviewed images, changed
-channels, differing settings, unresolved groups, and more than 50% excluded
-objects. These are prompts for inspection, not automatic diagnoses.
+**Nuclear QC.** Nuclei at the image edge are excluded automatically. Click a
+nucleus to exclude or restore it. Nuclear and cell exclusions are independent,
+and running the DAPI analysis again replaces the previous nuclear result.

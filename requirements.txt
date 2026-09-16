@@ -1,13 +1,13 @@
-# CellScope MVP dependencies
+# CellScope runtime dependencies (the same as `pip install -e ".[cellpose]"`).
+# pyproject.toml is the source of truth; development tools are in the `dev` extra.
 #
-# numpy is pinned <2 because the surrounding scientific stack on this machine
-# (torch 2.5.1+cu124, numba 0.60, scipy 1.11) is built against the 1.26 ABI.
+# numpy is pinned <2 because the scientific stack this is tested with
+# (torch 2.5.1+cu124, scipy 1.11) is built against the 1.26 ABI.
 #
-# cellpose 4.x (Cellpose-SAM) is a breaking change from 3.x: models.Cellpose and
-# SizeModel were removed, leaving only CellposeModel, and eval() requires
-# 3-channel input. src/segmentation.py adapts to both, but 4.x is the target.
+# cellpose 4.x (Cellpose-SAM) is a breaking change from 3.x. For a GPU, install
+# the CUDA build of PyTorch before this file (see README).
 #
-# gradio is pinned <6 for a stable Blocks / State / SelectData API.
+# gradio is pinned <6 for a stable Blocks / State / event API.
 
 gradio>=5.30,<6
 cellpose>=4.0,<5
@@ -18,7 +18,4 @@ scipy>=1.11
 Pillow>=10
 plotly>=5.20
 tifffile>=2024.1
-pytest>=7.4
-
-# PDF analysis reports
 reportlab>=4.0,<5

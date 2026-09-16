@@ -52,3 +52,7 @@ tmp/
 *.npy
 *.npz
 *.pdf
+
+# Packaging output
+build/
+dist/

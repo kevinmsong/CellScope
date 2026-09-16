@@ -1,89 +1,133 @@
 # CellScope
 
-CellScope is a local application for reviewing fluorescence microscopy segmentation
-and producing traceable cell measurements. It supports batch processing, manual
-quality control, independent DAPI nuclear counts, and reproducible exports.
+CellScope is a local application for segmenting fluorescence microscopy images,
+reviewing the result cell by cell, and producing traceable morphology
+measurements. It keeps single cells, unresolved groups and excluded objects
+distinct, never invents a cell count it cannot see, and exports everything
+needed to show how each number was produced.
 
-## Run locally
+## Install (Windows)
 
-Use Python 3.10 or newer; Python 3.12 is tested. From this directory:
+You need Python 3.10–3.12 ([python.org](https://www.python.org/downloads/)).
+Tick **Add python.exe to PATH** in the installer. Then, in PowerShell, from this
+folder:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python app.py
+python -m pip install --upgrade pip
 ```
 
-Open the local URL printed in the terminal (normally `http://127.0.0.1:7860`).
-Cellpose downloads model weights on its first use. A CUDA-compatible GPU is
-optional. The explicitly named `threshold_watershed` engine works without
-Cellpose and is useful for testing, but may perform poorly on crowded fields.
+**With an NVIDIA GPU** (recommended for Cellpose). Install the CUDA build of
+PyTorch first, then CellScope with Cellpose:
 
-CellScope is intended to run on a trusted local computer. Project recovery files
-contain image data and are available to users of that local server. Do not expose
-the app publicly without adding authentication and storage isolation.
+```powershell
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -e ".[cellpose]"
+```
+
+**CPU only.** Skip the first line. Cellpose runs on the CPU, several times more
+slowly:
+
+```powershell
+python -m pip install -e ".[cellpose]"
+```
+
+**Without Cellpose.** `python -m pip install -e .` installs CellScope with only
+its threshold-and-watershed engine. That engine is useful for testing, but
+performs poorly on crowded fields.
+
+`requirements.txt` lists the same runtime dependencies, including Cellpose, for
+tools that expect one.
+
+Tested with Python 3.12, Cellpose 4.2 (`cpsam`), PyTorch 2.5 (CUDA 12.4) and
+Gradio 5.50. Cellpose 3.x is not supported. Cellpose downloads its model weights
+(about 1.2 GB) the first time it runs.
+
+## Run
+
+```powershell
+cellscope                    # or: python -m cellscope, or python app.py
+```
+
+Open the address it prints, normally <http://127.0.0.1:7860>.
+
+| Option | Effect |
+|---|---|
+| `--port 7861` | Use a different port |
+| `--cpu` | Never use the GPU |
+| `--projects D:\cellscope-projects` | Where autosaves are kept (default `projects\`) |
+| `--autosave-interval 30` | Seconds between checks for unsaved changes |
+| `--no-preload` | Do not load the Cellpose model at start-up |
+| `--inbrowser` | Open a browser tab |
+| `--version` | Print CellScope, Cellpose, PyTorch and GPU versions |
+
+CellScope is meant for a trusted local computer. It has no authentication, and
+autosaves contain image data. Do not expose it on a network, or use `--share`,
+unless you understand that anyone who can reach it can see and change the data.
 
 ## A typical analysis
 
-1. **Batch:** upload images, name the experiment, choose the cell channel, and
-   calibrate with a known scale bar or pixel resolution. The optional nuclear
-   guide helps cell segmentation; it is separate from DAPI counting.
-2. **Segment:** inspect settings and run one image or the whole batch. Edge-touching
-   cells are automatically excluded. Original segmentation masks remain intact.
-3. **Review:** click cells to exclude or restore them. Gray outlines indicate
-   excluded cells. Inspect linked measurements, zoom/pan, adjust opacity, undo/redo,
-   and correct boundaries. Mark each image reviewed when satisfied.
-4. **DAPI nuclei:** independently segment the blue channel (or a separate nuclear
-   file), inspect nuclear masks, and review the count of directly touching nuclei.
-5. **Quality & design:** check readiness and assign wells, conditions, and biological
-   replicate labels. Compare well and replicate summaries without treating cells
-   as independent biological replicates.
-6. **Export:** download an analysis archive containing CSV measurements, masks,
-   QC history, metadata, and a PDF report. A standalone PDF is also available on
-   Quality & design.
-7. **Projects & presets:** save a portable `.cellscope` project to resume later.
-   Autosaves run every 60 seconds and after completed batch images. Recover them
-   from the same tab after restarting the app.
+The bar across the top shows where you are: **Import → Calibrate → Segment →
+Review → Design → Export**. A single *Next* line always says what to do next.
 
-## What is included
+1. **Import & calibrate.**
+   - Name the experiment, add images, and choose the cell channel and an optional
+     nuclear guide channel.
+   - Calibrate using one of these:
+     - a scale bar detected on the image;
+     - two clicks on the bar;
+     - a separate ruler frame;
+     - a µm-per-pixel value.
 
-| Feature | Where to find it |
-|---|---|
-| Persistent System, Light, and Dark appearance | Header |
-| Save/open projects and recover local autosaves | Projects & presets |
-| Zoom, pan, original view, overlay opacity | Review > View and correction tools |
-| Undo/redo; automatic invalidation of stale review | Review |
-| Split, merge, and polygon boundary correction | Review > Correct segmentation |
-| Click a cell or measurement row to inspect it | Review > Linked cell measurements |
-| Reusable, named JSON analysis presets | Projects & presets |
-| Cancellation, resume, and retry failed images | Processing |
-| Readiness checks, well/replicate summaries, PDF | Quality & design |
-| Separate direct-contact nuclear counts | DAPI nuclei |
-| Audit-ready masks, tables, settings and reports | Export |
+     Or confirm that you want pixel units.
+2. **Segment.**
+   - Use **Preview on this image** to try settings on one representative field.
+     It shows before-and-after counts. Keep or discard the result.
+   - Then **Run batch**. Changing a setting never re-runs anything by itself.
+     Images segmented with different settings are marked *stale*, and a batch
+     run re-segments only new, failed and stale images.
+3. **Review.**
+   - Click cells to exclude or restore them, or inspect them.
+   - Zoom with the mouse wheel and drag to pan.
+   - Correct boundaries by splitting, merging or drawing a polygon, with undo and
+     redo, then mark each image reviewed. Press <kbd>?</kbd> for the keyboard
+     shortcuts.
+   - Cells touching the image edge, or a scale bar burned into the image, are
+     excluded automatically. They are logged and can be restored.
+4. **Design & compare.** Give each image a well, condition and biological
+   replicate. Summaries follow fields → wells → biological replicates →
+   conditions, and a dot plot shows one point per replicate.
+5. **Export.** A single archive holds measurements, masks, overlays, QC history,
+   a PDF report and `manifest.json`. The manifest records the software versions,
+   device, parameters, calibration, QC decisions, corrections and checksums.
+6. **Projects.** Save a portable `.cellscope` project. Changes are also autosaved
+   in the background and can be recovered after a restart.
+
+**DAPI nuclei** counts nuclei independently of the cell segmentation.
 
 ## How to interpret the results
 
-- A resolved cell contributes individual morphology measurements. An unresolved
-  group does not receive an invented cell count or per-cell measurements.
-- Cell clusters are recomputed after exclusions; excluding a bridge cell can
-  separate a cluster.
-- DAPI counts are **nuclear segmentation estimates**, not cytoplasmic cell counts.
-  Direct contact means nuclear masks share an edge or corner, with no background
-  gap. Reports distinguish touching nuclei, touching groups, and contact pairs.
-- Measurements use physical units only after calibration. Pixel and physical-unit
-  results are never pooled together in the main batch summary.
-- Experimental summaries pool fields within a well, average wells within each
-  biological replicate, then compare replicate means. No cell-level p-values are
-  calculated. Missing design labels are omitted rather than guessed.
+- **Unresolved groups.** A resolved cell has its own morphology measurements. A
+  group that could not be separated gets group-level measurements only, and its
+  cell count is reported as NA, never estimated.
+- **Clusters and exclusions.** Clusters are recomputed after every exclusion, so
+  excluding a bridging cell can split a cluster.
+- **Units.** Physical units are used only after calibration. Pixel and physical
+  values are never mixed in one column or one summary.
+- **What counts as n.** Cells are not biological replicates. Replicate summaries
+  pool fields within a well, weight wells equally within a replicate, and weight
+  replicates equally within a condition. Condition *n* is the number of
+  biological replicates. No significance tests are run.
+- **DAPI counts.** These are nuclear segmentation estimates, not cell counts.
 
-See the [user guide](docs/USER_GUIDE.md) for correction and recovery workflows,
-[formats](docs/FORMATS.md) for project/export contents, and
-[development guide](docs/DEVELOPMENT.md) for validation and architecture.
+See the [user guide](docs/USER_GUIDE.md) for the workflow in detail,
+[formats](docs/FORMATS.md) for project and export contents,
+[performance](docs/PERFORMANCE.md) for benchmarks, and the
+[development guide](docs/DEVELOPMENT.md) for architecture and testing.
 
 ## Data stays out of Git
 
-This repository contains source code, documentation, and synthetic tests only.
-Sample microscopy images, project archives, autosaves, model weights, generated
-PDFs, screenshots, and analysis outputs are ignored. Tests generate their own
-small synthetic arrays in memory; no sample image files are committed.
+This repository contains source code, documentation and synthetic tests only.
+Microscopy images, projects, autosaves, model weights, reports, screenshots and
+analysis outputs are ignored. Tests generate their own synthetic data.

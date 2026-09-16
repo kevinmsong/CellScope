@@ -1,65 +1,118 @@
 # Project and export formats
 
-## Portable projects
+## Portable projects (`.cellscope`)
 
-A `.cellscope` file is a ZIP archive containing `project.json` (schema version 1)
-and NumPy arrays under `arrays/`. Arrays are read with `allow_pickle=False`;
-loading a project does not execute Python objects or extract archive paths.
-Known dataclass names and fields are validated, and the reader rejects unknown
-schema versions, invalid cell label dimensions, and mismatched object IDs.
-The uncompressed archive limit is 8 GiB.
+A ZIP archive with `project.json` and one NumPy array per file under `arrays/`.
 
-Projects preserve source pixels and their recorded hashes, calibration, parameters,
-cell and nuclear masks, exclusions, QC/correction logs, review notes and experimental
-design. Source pixels and raw cell segmentation are restored as read-only arrays.
-Derived measurement caches, temporary detection proposals, and undo/redo stacks
-are rebuilt or reset rather than serialized.
+**Safety**
 
-Local saves use a temporary file and atomic replacement, so a failed write does
-not replace the previous good project. Back up downloaded projects separately;
-autosave is recovery storage, not a substitute for backup.
+- Arrays are read with `allow_pickle=False`.
+- Records are rebuilt only from CellScope's own dataclasses.
+- Archive paths are never extracted.
+- The uncompressed size is limited to 8 GiB.
 
-## Analysis archive
+**Schema 2** (CellScope 0.2). `project.json` holds:
 
-`batch_analysis.zip` includes the following root files:
+```json
+{"schema": 2, "app": {"cellscope": "0.2.0", "python": "…", "numpy": "…"},
+ "saved_at": "…", "batch": { … }}
+```
+
+**What a project stores**
+
+- Source pixels with their SHA-256, calibration, channels and every parameter
+  group, including the automatic exclusion rules.
+- Raw and working masks, object records, burned-in scale-bar detections, and the
+  fingerprint of the settings each segmentation used.
+- Exclusions, QC and correction logs, review state and notes.
+- Experimental design and DAPI analysis.
+
+**What is rebuilt on load instead of stored:** display copies, measurement
+caches and undo history.
+
+**Compatibility**
+
+| Case | Behaviour |
+|---|---|
+| Schema 1 (CellScope 0.1) | Migrated in memory; results and reviews are unchanged |
+| Newer schema | Refused, naming the version that wrote it |
+| Unknown field on a known record | Dropped, with a warning |
+| Unknown record type | Refused |
+| Truncated, damaged or incomplete file | `ProjectError` naming the problem |
+| Masks that do not match the image or the object list | Refused |
+
+**Writes.** A project is written to a temporary file beside its target, flushed,
+and moved into place, with retries while a sync client or virus scanner briefly
+holds the file. A failed save leaves the previous file untouched. Temporary files
+left by an interrupted save are removed on the next start.
+
+## Analysis archive (`batch_analysis.zip`)
 
 | File | Contents |
 |---|---|
-| `batch_summary.csv` | Pooled accepted-cell measurements |
-| `per_image_summary.csv` | Counts and measurements for each segmented image |
-| `all_cells.csv` | Accepted resolved cells with image and well provenance |
-| `all_clusters.csv` | QC-approved cell clusters |
-| `qc_log.csv` | Cell exclusion/restore history across images |
-| `readiness.csv` | Checks captured at export time |
-| `well_summary.csv` | Cell area summarized within wells |
-| `replicate_summary.csv` | Equal-weight well means within biological replicates |
-| `condition_summary.csv` | Replicate count, mean and between-replicate SD |
-| `nuclei_counts.csv` | Separate DAPI counts for analyzed images |
-| `report.pdf` | Readable summary, overlays, definitions, methods and QC history |
-| `metadata.json` | Batch and image provenance, settings and design labels |
+| `manifest.json` | Machine-readable provenance (below) |
+| `README.txt` | A short guide to the archive |
+| `batch_summary.csv` | Every accepted cell pooled (descriptive) |
+| `per_image_summary.csv` | One row per image, including exclusions by reason |
+| `all_cells.csv` | Accepted, resolved cells tagged with image and well |
+| `all_clusters.csv` | Clusters; `cell_count` is NA when a member is unresolved |
+| `design_images.csv`, `design_wells.csv`, `design_replicates.csv`, `design_conditions.csv` | The replicate hierarchy for cell area, with n at each level |
+| `well_summary.csv`, `replicate_summary.csv`, `condition_summary.csv` | The same hierarchy in the 0.1 layout |
+| `qc_log.csv` | Every exclusion and restoration, with its reason |
+| `readiness.csv` | Checks outstanding at export time |
+| `nuclei_counts.csv` | Independent DAPI counts |
+| `report.pdf` | Readable report: status, replicate tables and dot plot, overlays, definitions, methods, QC history |
+| `metadata.json` | Batch provenance (0.1 layout, extended) |
 
-DAPI-only images also retain their nuclear masks and metadata in mixed batches.
-The DAPI tab offers a standalone `nuclei_analysis.zip` download without requiring
-cell segmentation.
+**Per-image folders.** Each segmented image has a folder `images/<name>/`
+containing:
 
-Each cell-segmented image has a folder under `images/`, including its measurement
-CSVs and metadata, plus:
+| File | Contents |
+|---|---|
+| `cell_measurements.csv` | Per-cell measurements; includes `touches_border` and `touches_annotation` |
+| `cluster_measurements.csv` | Per-cluster measurements |
+| `image_summary.csv` | One row describing the image |
+| `contact_graph.csv` | Which cells touch which |
+| `metadata.json` | Full per-image provenance, including software versions, automatic QC rules and the burned-in annotation |
+| `masks/raw_labels.tif` | The segmentation engine's output |
+| `object_labels.tif` | After splitting and manual correction, before exclusions |
+| `masks/qc_labels.tif` | What was measured |
+| `overlays/segmentation_overlay.png` | The overlay image |
+| `edit_log.json` | Manual corrections |
+| `nuclei_*` | Nuclear masks, measurements and metadata, when analysed |
 
-- `masks/raw_labels.tif`: original segmentation engine output.
-- `object_labels.tif`: split/manually corrected object mask before exclusions.
-- `masks/qc_labels.tif`: labels remaining after cell exclusions.
-- `edit_log.json`: manual correction and undo/redo history.
-- `nuclei_labels.tif`: independent pre-QC DAPI masks, when analyzed.
-- `nuclei_measurements.csv`: nuclear IDs, inclusion, direct contact, groups and area.
-- `nuclei_metadata.json`: nuclear method/settings, counts, exclusions and QC log.
+**How IDs relate**
 
-IDs link masks to measurements. Excluded labels remain in pre-QC masks and are
-identified in the corresponding QC metadata. Nuclear IDs and cell IDs are
-separate namespaces; matching numbers do not imply a nucleus belongs to that cell.
-Unresolved cell groups do not receive invented individual cell measurements.
+- IDs link masks to measurements.
+- Nuclear IDs and cell IDs are separate namespaces.
+- Unresolved groups never receive per-cell measurements.
+
+### `manifest.json` (manifest_schema 1)
+
+| Key | Contents |
+|---|---|
+| `software` | Versions of CellScope, Python, the OS, numpy, scipy, scikit-image, pandas, Pillow, tifffile, Cellpose, PyTorch, CUDA and the GPU (when PyTorch ran), Gradio, ReportLab, Plotly |
+| `batch` | ID, label, image/segmented/reviewed counts, units, calibration consistency, whether calibration was confirmed |
+| `statistics` | The replicate aggregation rule, the pooled-summary rule, the rule for cluster cell counts, and `"tests": "none"` |
+| `shared_parameters` | Batch default settings |
+| `images[]` | One entry per image (below) |
+| `files[]` | Path, size and SHA-256 of every other file in the archive |
+
+Each `images[]` entry records:
+
+- the source image (name, size, SHA-256), design labels and channels;
+- calibration and every parameter group;
+- inference details: engine, model, device, tile batch, analysis scale, any
+  out-of-memory recovery, and stage timings;
+- the segmentation fingerprint, and whether settings changed since segmentation;
+- the burned-in scale-bar detection;
+- QC exclusions by reason, correction counts and operations;
+- review state, note and signature;
+- counts, any error, and the folder in the archive.
 
 ## Presets
 
-Presets are JSON with schema version 1, a name, channel choices and parameter
-records. They contain no images and no calibration. Preserve the JSON alongside
-an experiment protocol if a named analysis configuration must be shared.
+JSON with `schema` 2, a name, channel choices, and the preprocessing,
+segmentation, splitting, clustering and automatic QC settings. Schema 1 presets,
+which have no QC group, still apply with default rules. Presets never contain
+images, calibration or QC decisions.

@@ -11,11 +11,12 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install CPU test dependencies
-        run: >-
-          python -m pip install "numpy>=1.26,<2" "gradio>=5.30,<6"
-          "scikit-image>=0.24" pandas scipy Pillow plotly tifffile reportlab pytest ruff
+      # CPU-only: Cellpose and PyTorch are not installed; tests that need them skip.
+      - name: Install
+        run: python -m pip install -e . pytest ruff psutil
       - name: Lint
         run: python -m ruff check .
       - name: Test
         run: python -m pytest -q
+      - name: Launcher
+        run: python -m cellscope --version
