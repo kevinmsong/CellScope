@@ -1,13 +1,14 @@
 """Versioned, portable project archives: JSON metadata and non-pickled NumPy arrays."""
-from dataclasses import fields, is_dataclass
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import zipfile
+from dataclasses import fields, is_dataclass
+from pathlib import Path
 
 import numpy as np
+
 from . import types
 
 SCHEMA = 1
@@ -84,7 +85,7 @@ def load_project(path):
             return {k: decode(v) for k, v in value.items()}
         batch = decode(manifest["batch"])
     if not isinstance(batch, types.BatchSession):
-        raise ValueError("Not a CellScope batch project.")
+        raise ValueError("Not a CellScope batch project.")  # noqa: TRY004 - a content error
     for session in batch.images:
         for record in (session.image, session.nuclear_image, session.reference_image):
             if record:
@@ -101,6 +102,7 @@ def load_project(path):
             ids = {o.object_id for o in session.objects}
             if set(np.unique(session.object_labels)) - {0} != ids:
                 raise ValueError("Mask IDs do not match object records.")
+            session.object_labels.flags.writeable = False
     return batch
 
 

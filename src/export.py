@@ -335,8 +335,8 @@ def export_batch(
         pooled_clusters(batch).to_csv(os.path.join(staging, "all_clusters.csv"), index=False)
         batch_qc_log(batch).to_csv(os.path.join(staging, "qc_log.csv"), index=False)
 
-        from .quality import readiness, experimental_summary
         from .nuclei import batch_nuclear_counts
+        from .quality import experimental_summary, readiness
         from .report import write_report
         readiness(batch).to_csv(os.path.join(staging, "readiness.csv"), index=False)
         for name, table in zip(("well", "replicate", "condition"), experimental_summary(batch)):

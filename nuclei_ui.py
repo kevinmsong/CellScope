@@ -1,11 +1,12 @@
 """Separate DAPI counting tab with reversible nuclear exclusions."""
 import gradio as gr
 import numpy as np
-from src.nuclei import segment_nuclei, nuclear_counts, nuclear_tables, batch_nuclear_counts
-from src.image_io import make_display, extract_channel
-from src.visualize import make_overlay, _resize_labels
-from src.types import ObjectRecord, ClusterRecord, utc_now
+
 from src.clustering import assign_clusters
+from src.image_io import extract_channel
+from src.nuclei import batch_nuclear_counts, nuclear_counts, nuclear_tables, segment_nuclei
+from src.types import ClusterRecord, ObjectRecord, utc_now
+from src.visualize import _resize_labels, make_overlay
 
 
 def nuclear_view(batch):
@@ -67,6 +68,7 @@ def build_nuclei_tab(batch):
         download = gr.File(label="Nuclear analysis archive")
         def export(b):
             import tempfile
+
             from src.nuclei import export_nuclei
             try:
                 return export_nuclei(b, tempfile.mkdtemp(prefix="cellscope_nuclei_export_"))

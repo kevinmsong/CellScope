@@ -1,15 +1,16 @@
 """Regression coverage for persistence, corrections, design summaries and DAPI contact."""
-from dataclasses import replace
 import json
 import zipfile
+from dataclasses import replace
 
 import numpy as np
 import pytest
-from src.types import AnalysisSession, BatchSession, ImageRecord, ObjectRecord
-from src.project import save_project, load_project, preset_dict, apply_preset
-from src.review import checkpoint, history, correct_mask, signature, validate_review, click_position
+
 from src.nuclei import nuclear_counts, nuclear_edges, segment_nuclei
-from src.quality import readiness, experimental_summary
+from src.project import apply_preset, load_project, preset_dict, save_project
+from src.quality import experimental_summary, readiness
+from src.review import checkpoint, click_position, correct_mask, history, signature, validate_review
+from src.types import AnalysisSession, BatchSession, ImageRecord, ObjectRecord
 
 
 @pytest.fixture

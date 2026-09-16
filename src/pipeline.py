@@ -14,8 +14,8 @@ for provenance.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ import pandas as pd
 from .clustering import build_clusters
 from .morphometry import measure_cells, measure_clusters
 from .preprocessing import preprocess_image
-from .qc import apply_qc, qc_counts, exclude_border_touching
+from .qc import apply_qc, exclude_border_touching, qc_counts
 from .segmentation import segment_cells, split_touching_cells
 from .types import AnalysisSession, ClusterRecord, ObjectRecord
 
@@ -73,6 +73,7 @@ def run_segmentation(
 
     raw_labels = np.asarray(raw_labels)
     raw_labels.flags.writeable = False
+    object_labels.flags.writeable = False     # copy-on-write; see review.freeze_labels
     session.raw_labels = raw_labels
     session.object_labels = object_labels
     session.objects = objects

@@ -1,17 +1,26 @@
 """Readable PDF reports generated from current, QC-approved results."""
 from io import BytesIO
-import pandas as pd
 from xml.sax.saxutils import escape
+
+import pandas as pd
 from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+from reportlab.platypus import (
+    Image,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
 from . import __version__
-from .pipeline import compute_results
-from .quality import readiness, experimental_summary
-from .visualize import make_overlay
 from .image_io import make_display
+from .pipeline import compute_results
+from .quality import experimental_summary, readiness
+from .visualize import make_overlay
 
 
 def write_report(batch, path):

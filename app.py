@@ -56,6 +56,7 @@ from src.qc import (
     qc_log_dataframe,
     restore_object,
 )
+from src.review import checkpoint, click_position, display_view, signature, validate_review
 from src.scalebar import detect_scale_bar
 from src.segmentation import cellpose_available, cellpose_version
 from src.types import (
@@ -67,9 +68,7 @@ from src.types import (
     SplitParams,
 )
 from src.visualize import build_all_figures, make_overlay
-from ui_theme import THEME_JS, CSS, build_theme, callout, empty_state, legend_html, section
-
-from src.review import checkpoint, signature, validate_review, display_view, click_position
+from ui_theme import CSS, THEME_JS, build_theme, callout, empty_state, legend_html, section
 
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "cellscope_exports")
 
@@ -1001,8 +1000,9 @@ def _review_views(batch, show_ids=True, show_clusters=False, message=""):
         overlay = _display_base(session).copy()
     elif session.selected_object:
         import numpy as np
-        from src.visualize import _resize_labels
         from skimage.segmentation import find_boundaries
+
+        from src.visualize import _resize_labels
         small = _resize_labels(session.object_labels, overlay.shape[:2])
         overlay = overlay.copy()
         overlay[find_boundaries(small == session.selected_object, mode="inner")] = (255, 255, 255)
@@ -1819,6 +1819,7 @@ def build_interface():
 
         # Segmentation, then the dependent tabs. The follow-ups are silent
         # because they update tabs that are not on screen.
+        run_events = []
         for button, handler, extra in (
             (run_one, on_segment_one, []),
             (run_all, on_segment_all, [skip_done]),
@@ -1827,6 +1828,7 @@ def build_interface():
                 handler, segment_inputs[:-1] + extra + [batch], segment_outputs,
                 show_progress_on=[segmentation_preview],
             )
+            run_events.append(run_event)
             run_event.then(
                 on_toggle_labels, [show_ids, show_clusters, batch], review_outputs,
                 show_progress="hidden",
@@ -1834,7 +1836,8 @@ def build_interface():
                 on_refresh_results, [batch], results_outputs, show_progress="hidden",
             )
 
-        extensions.cancel.click(None, cancels=[run_event], queue=False)
+        # Both runs, not just whichever the loop above happened to wire last.
+        extensions.cancel.click(None, cancels=run_events, queue=False)
 
         for control in (show_ids, show_clusters):
             control.change(on_toggle_labels, [show_ids, show_clusters, batch],

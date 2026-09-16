@@ -1,18 +1,18 @@
 """Project management and review controls kept separate from the main app wiring."""
-from pathlib import Path
 import json
 import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import gradio as gr
 import pandas as pd
 
-from src.project import save_project, load_project, preset_dict, apply_preset
-from src.review import history, correct_mask
-from src.quality import readiness, experimental_summary
 from src.pipeline import compute_results, iter_batch_segmentation
+from src.project import apply_preset, load_project, preset_dict, save_project
+from src.quality import experimental_summary, readiness
 from src.report import write_report
+from src.review import correct_mask, history
 
 PROJECTS = Path(__file__).resolve().parent / "projects"
 

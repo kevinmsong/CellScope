@@ -189,7 +189,7 @@ class PeakMemory:
             self.peak = max(self.peak, self._rss())
             self._stop.wait(self.interval)
 
-    def __enter__(self) -> PeakMemory:
+    def __enter__(self):
         self.start = self.peak = self._rss()
         if self._process is not None:
             self._thread = threading.Thread(target=self._run, daemon=True)

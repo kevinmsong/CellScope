@@ -6,12 +6,13 @@ contact uses 8-neighbour pixel adjacency, including diagonal contacts.
 import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
-from skimage.filters import gaussian, threshold_otsu
 from skimage.feature import peak_local_max
+from skimage.filters import gaussian, threshold_otsu
 from skimage.morphology import remove_small_objects
 from skimage.segmentation import watershed
-from .image_io import extract_channel
+
 from .clustering import assign_clusters, build_cell_contact_graph
+from .image_io import extract_channel
 from .types import utc_now
 
 
@@ -108,8 +109,9 @@ def batch_nuclear_counts(batch):
 
 
 def write_nuclear_files(session, directory):
-    from pathlib import Path
     import json
+    from pathlib import Path
+
     from .export import write_mask
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -122,9 +124,9 @@ def write_nuclear_files(session, directory):
 
 
 def export_nuclei(batch, directory):
-    from pathlib import Path
-    import zipfile
     import tempfile
+    import zipfile
+    from pathlib import Path
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if not any(s.nuclei_labels is not None for s in batch.images):

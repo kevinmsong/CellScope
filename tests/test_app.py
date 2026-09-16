@@ -293,6 +293,17 @@ def test_upload_populates_both_channel_controls(tmp_path):
     }
 
 
+def test_cancel_stops_both_segmentation_runs():
+    """Cancel once only reached "run all": the loop leaked its last event."""
+    config = cellscope_app.build_interface().get_config_file()
+    names = {d["id"]: d.get("api_name") for d in config["dependencies"]}
+    cancelled = [
+        {names[i] for i in d["cancels"]}
+        for d in config["dependencies"] if d.get("cancels")
+    ]
+    assert any({"on_segment_one", "on_segment_all"} <= group for group in cancelled)
+
+
 def test_every_event_has_outputs():
     for dependency in _dependencies():
         name = getattr(dependency.fn, "__name__", "?")
@@ -598,7 +609,7 @@ def test_click_callback_wired_to_review_outputs(clickable_batch):
 
 
 def test_theme_has_distinct_dark_surfaces():
-    from ui_theme import build_theme, CSS
+    from ui_theme import CSS, build_theme
     theme = build_theme()
     assert theme.body_background_fill != theme.body_background_fill_dark
     assert theme.body_text_color != theme.body_text_color_dark

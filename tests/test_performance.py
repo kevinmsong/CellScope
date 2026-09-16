@@ -1,6 +1,7 @@
 """Memory-aware inference must keep the original pixel grid and settings."""
 import numpy as np
 import pytest
+
 import src.segmentation as segmentation
 from src.types import SegmentationParams
 

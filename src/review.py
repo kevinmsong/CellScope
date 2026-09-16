@@ -1,12 +1,12 @@
 """Reversible review edits and conservative, explicitly manual mask corrections."""
-from copy import deepcopy
-from dataclasses import replace
 import hashlib
 import json
+from dataclasses import replace
 
 import numpy as np
 from skimage.draw import polygon
 from skimage.segmentation import watershed
+
 from .types import ObjectRecord, utc_now
 
 
@@ -23,14 +23,32 @@ def validate_review(session):
         session.reviewed = False
 
 
+#: Undo depth per image.
+UNDO_DEPTH = 12
+
+
+def freeze_labels(labels):
+    """Make a label array read-only and return it.
+
+    Label arrays are copy-on-write: every edit builds a new array. That is what
+    lets an undo snapshot hold a reference instead of a copy, and lets a
+    snapshot for autosave be taken without duplicating masks.
+    """
+    if labels is not None:
+        labels = np.asarray(labels)
+        labels.flags.writeable = False
+    return labels
+
+
 def snapshot(session):
-    return (session.object_labels.copy() if session.object_labels is not None else None,
-            list(session.objects), set(session.qc.excluded_ids))
+    """State needed to undo one edit. The label array is shared, not copied."""
+    return (freeze_labels(session.object_labels), list(session.objects),
+            set(session.qc.excluded_ids))
 
 
 def checkpoint(session):
     session.undo_stack.append(snapshot(session))
-    session.undo_stack[:] = session.undo_stack[-12:]
+    session.undo_stack[:] = session.undo_stack[-UNDO_DEPTH:]
     session.redo_stack.clear()
     session.reviewed = False
 
@@ -45,9 +63,13 @@ def history(session, redo=False):
         session.qc.restore(oid, "redo" if redo else "undo")
     for oid in excluded - session.qc.excluded_ids:
         session.qc.exclude(oid, "redo" if redo else "undo")
-    session.object_labels, session.objects = labels, objects
-    session.segmentation_version += 1
-    session.results_cache = None
+    # Only a change of mask invalidates the geometry. An undone exclusion moves
+    # qc.version alone, which is already part of every results key.
+    if labels is not session.object_labels:
+        session.object_labels, session.objects = labels, objects
+        session.segmentation_version += 1
+    else:
+        session.objects = objects
     session.reviewed = False
     session.edit_log.append({"action": "redo" if redo else "undo", "timestamp": utc_now()})
     return True
@@ -106,7 +128,7 @@ def correct_mask(session, operation, ids, points):
         if oid in ids or oid == new_id:
             obj = replace(obj, status="resolved", touches_border=oid in border_ids, unresolved_reason=None)
         objects.append(obj)
-    session.object_labels = labels
+    session.object_labels = freeze_labels(labels)
     session.objects = objects
     # Split children inherit their parent's inclusion decision.
     if operation == "Split" and ids[0] in session.qc.excluded_ids:
@@ -126,7 +148,7 @@ def viewport(session, base_shape):
 
 
 def display_view(session, overlay):
-    from PIL import Image, ImageDraw
+    from PIL import Image
     x, y, w, h = viewport(session, overlay.shape)
     image = Image.fromarray(overlay[y:y+h, x:x+w]).resize(
         (overlay.shape[1], overlay.shape[0]), Image.Resampling.NEAREST)
