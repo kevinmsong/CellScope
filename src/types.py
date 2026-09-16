@@ -453,6 +453,12 @@ class AnalysisSession:
     #: (key, AnalysisResults) for the last computed results. Never read without
     #: an exact key match -- see :func:`src.pipeline.compute_results`.
     results_cache: Any = field(default=None, repr=False, compare=False)
+    #: Per-object and per-cluster geometry, reusable across QC edits of the
+    #: same mask. Owned by :func:`src.pipeline.compute_results`; never saved.
+    geometry_cache: Any = field(default=None, repr=False, compare=False)
+    #: Derived display data (overlay layers, tables). Keyed like the results;
+    #: never saved.
+    view_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     qc: QCState = field(default_factory=QCState)
 
@@ -570,6 +576,10 @@ class BatchSession:
     segmentation_params: SegmentationParams = field(default_factory=SegmentationParams)
     split_params: SplitParams = field(default_factory=SplitParams)
     cluster_params: ClusterParams = field(default_factory=ClusterParams)
+
+    #: Batch-level derived tables (pooled cells, summaries), keyed on every
+    #: image's results key. Never saved.
+    derived_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     #: Parameter attributes an image may diverge from the batch on.
     SHARED_PARAMS = (

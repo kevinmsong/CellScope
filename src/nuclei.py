@@ -34,22 +34,7 @@ def segment_nuclei(session, channel="blue", min_area=25, seed_distance=5, sigma=
         distance = ndi.distance_transform_edt(mask)
         coordinates = peak_local_max(distance, min_distance=int(seed_distance), labels=mask,
                                      exclude_border=False)
-        markers = np.zeros(mask.shape, np.int32)
-        for i, (y, x) in enumerate(coordinates, 1):
-            markers[y, x] = i
-        # Ensure every connected foreground component has a seed.
-        components, n = ndi.label(mask)
-        next_id = len(coordinates) + 1
-        for component in range(1, n+1):
-            region = components == component
-            if not markers[region].any():
-                y, x = np.unravel_index(np.argmax(np.where(region, distance, -1)), mask.shape)
-                markers[y, x] = next_id
-                next_id += 1
-        labels = watershed(-distance, markers, mask=mask).astype(np.int32)
-        for value, area in zip(*np.unique(labels, return_counts=True)):
-            if value and area < min_area:
-                labels[labels == value] = 0
+        labels = _seed_and_filter(mask, distance, coordinates, int(min_area))
     session.nuclei_labels = labels
     session.nuclei_excluded = set(map(int, np.unique(np.concatenate(
         [labels[0], labels[-1], labels[:, 0], labels[:, -1]])))) - {0}
@@ -62,18 +47,60 @@ def segment_nuclei(session, channel="blue", min_area=25, seed_distance=5, sigma=
     return nuclear_counts(session)
 
 
+def _seed_and_filter(mask, distance, coordinates, min_area):
+    """Seeded watershed in which every foreground component gets a seed.
+
+    A component without a distance peak is seeded at its deepest point (the
+    first such pixel in raster order), then objects below ``min_area`` are
+    dropped. All per-component work is done in whole-image passes.
+    """
+    markers = np.zeros(mask.shape, np.int32)
+    coordinates = np.asarray(coordinates, dtype=np.intp).reshape(-1, 2)
+    markers[coordinates[:, 0], coordinates[:, 1]] = np.arange(1, len(coordinates) + 1)
+    components, n = ndi.label(mask)
+    if n:
+        seeded = np.zeros(n + 1, bool)
+        seeded[components[markers > 0]] = True
+        unseeded = np.flatnonzero(~seeded[1:]) + 1
+        if len(unseeded):
+            # Deepest point per component; ties go to the first pixel in raster
+            # order, as np.argmax would choose.
+            flat_components = components.ravel()
+            flat_distance = distance.ravel()
+            candidates = np.flatnonzero(np.isin(flat_components, unseeded))
+            order = np.lexsort((candidates, -flat_distance[candidates],
+                                flat_components[candidates]))
+            ranked = candidates[order]
+            first = np.ones(len(ranked), bool)
+            first[1:] = flat_components[ranked[1:]] != flat_components[ranked[:-1]]
+            positions = ranked[first]
+            ids = np.arange(len(coordinates) + 1, len(coordinates) + 1 + len(positions))
+            markers.ravel()[positions] = ids
+    labels = watershed(-distance, markers, mask=mask).astype(np.int32)
+    counts = np.bincount(labels.ravel())
+    small = counts < min_area
+    small[0] = False
+    labels[small[labels]] = 0
+    return labels
+
+
 def nuclear_edges(labels, gap=0):
     if gap:
         # Pixel-center radius = one pixel contact + requested background gap.
         return build_cell_contact_graph(labels, int(gap) + 1)
-    pairs = set()
+    labels = np.asarray(labels)
+    found = []
     for dy, dx in [(0, 1), (1, 0), (1, 1), (1, -1)]:
         a = labels[:labels.shape[0]-dy, max(0, -dx):labels.shape[1]-max(0, dx)]
         b = labels[dy:, max(0, dx):labels.shape[1]-max(0, -dx)]
         good = (a > 0) & (b > 0) & (a != b)
-        for x, y in zip(a[good], b[good]):
-            pairs.add(tuple(sorted((int(x), int(y)))))
-    return sorted(pairs)
+        if good.any():
+            first, second = a[good].astype(np.int64), b[good].astype(np.int64)
+            found.append(np.stack([np.minimum(first, second), np.maximum(first, second)], 1))
+    if not found:
+        return []
+    pairs = np.unique(np.concatenate(found), axis=0)
+    return [(int(x), int(y)) for x, y in pairs]
 
 
 def nuclear_tables(session):

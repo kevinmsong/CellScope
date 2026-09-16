@@ -35,12 +35,11 @@ def review_table(batch):
     s = batch.active if batch else None
     if s is None or not s.has_segmentation:
         return pd.DataFrame(columns=["cell_id", "included", "status", "reason"]), "No cell selected.", "", ""
-    cells = compute_results(s).cells.copy()
+    cells = compute_results(s).cells
     # Excluded cells retain diagnostic measurements, without entering accepted summaries.
-    excluded = [o for o in s.objects if o.object_id in s.qc.excluded_ids]
-    if excluded:
-        from src.morphometry import measure_cells
-        measurements = measure_cells(s.object_labels, excluded, [], s.calibration)
+    from src.pipeline import excluded_cell_measurements
+    measurements = excluded_cell_measurements(s)
+    if len(measurements):
         cells = pd.concat([cells, measurements], ignore_index=True)
     reasons = {a.object_id: a.reason for a in s.qc.log}
     rows = pd.DataFrame([{"cell_id": o.object_id, "included": s.qc.is_included(o.object_id),

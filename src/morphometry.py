@@ -279,17 +279,45 @@ CELL_SHAPE_COLUMNS = [
 ]
 
 
+def present_labels(labels: np.ndarray) -> set[int]:
+    """Every non-zero label value in an image, in one counting pass."""
+    labels = np.asarray(labels)
+    if not labels.size:
+        return set()
+    counts = np.bincount(labels.ravel())
+    return {int(v) for v in np.flatnonzero(counts) if v}
+
+
+def _cell_geometry(prop, labels_shape, calibration, scaled) -> dict[str, Any]:
+    """Every per-cell measurement that depends on the cell's own mask alone."""
+    if calibration.is_calibrated and calibration.is_isotropic:
+        measured = measure_region(prop, Calibration(), None)  # pixel frame
+        _isotropic_physical(measured, calibration)
+    else:
+        measured = measure_region(prop, calibration, scaled)
+    measured["touches_border"] = touches_border(prop.bbox, labels_shape)
+    return measured
+
+
 def measure_cells(
     labels: np.ndarray,
     objects: Iterable[ObjectRecord],
     clusters: Iterable[ClusterRecord],
     calibration: Calibration,
+    cache: dict[int, dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """One row per **resolved** object (§9).
 
     Objects with ``status == 'unresolved_cluster'`` are structurally absent:
     §12 forbids per-cell values for a group we could not separate, so there is
     no row for them to occupy.
+
+    ``cache`` maps object ID to its measured geometry. A cell's geometry comes
+    from its own mask alone (``regionprops`` crops each label to its bounding
+    box), so it is unchanged when *other* cells are excluded, and a caller can
+    reuse it across QC edits. The caller owns the cache and must discard it
+    whenever the mask or the calibration changes -- see
+    :func:`src.pipeline.compute_results`.
     """
     objects = list(objects)
     cluster_of: dict[int, ClusterRecord] = {}
@@ -297,17 +325,21 @@ def measure_cells(
         for member in cluster.member_ids:
             cluster_of[member] = cluster
 
-    px_props, scaled_props = _props_by_label(labels, calibration)
-    isotropic_physical = calibration.is_calibrated and calibration.is_isotropic
+    present = present_labels(labels)
+    wanted = [o for o in objects if o.is_resolved and o.object_id in present]
+    missing = [o.object_id for o in wanted if cache is None or o.object_id not in cache]
+
+    geometry: dict[int, dict[str, Any]] = {} if cache is None else cache
+    if missing:
+        px_props, scaled_props = _props_by_label(labels, calibration)
+        for object_id in missing:
+            geometry[object_id] = _cell_geometry(
+                px_props[object_id], labels.shape, calibration,
+                scaled_props.get(object_id) if scaled_props else None,
+            )
 
     rows: list[dict[str, Any]] = []
-    for obj in objects:
-        if not obj.is_resolved:
-            continue
-        prop = px_props.get(obj.object_id)
-        if prop is None:  # excluded by QC, or vanished during relabelling
-            continue
-
+    for obj in wanted:
         cluster = cluster_of.get(obj.object_id)
         row: dict[str, Any] = {
             "cell_id": obj.object_id,
@@ -319,17 +351,7 @@ def measure_cells(
             else "clustered",
             "segmentation_status": obj.status,
         }
-
-        if isotropic_physical:
-            measured = measure_region(prop, Calibration(), None)  # pixel frame
-            _isotropic_physical(measured, calibration)
-        else:
-            measured = measure_region(
-                prop, calibration, scaled_props.get(obj.object_id) if scaled_props else None
-            )
-        row.update(measured)
-
-        row["touches_border"] = touches_border(prop.bbox, labels.shape)
+        row.update(geometry[obj.object_id])
         row["split_from"] = obj.split_from if obj.split_from is not None else pd.NA
         row["raw_label"] = obj.raw_label if obj.raw_label is not None else pd.NA
         rows.append(row)
@@ -374,6 +396,68 @@ _MEMBER_METRICS_SHAPE = {
 
 def _cluster_mask(labels: np.ndarray, member_ids: Sequence[int]) -> np.ndarray:
     return np.isin(labels, np.asarray(member_ids, dtype=labels.dtype))
+
+
+def _closing_radius(contact_distance_px: int) -> int:
+    return max(1, int(math.ceil(contact_distance_px / 2))) if contact_distance_px > 0 else 0
+
+
+def _cluster_window(slices, member_ids, shape, pad: int):
+    """Bounding window of a cluster's members, padded and clipped to the image.
+
+    ``slices`` is ``ndimage.find_objects`` output. Returns ``None`` when no
+    member is present in the label image.
+    """
+    boxes = [
+        slices[i - 1] for i in member_ids
+        if 0 < i <= len(slices) and slices[i - 1] is not None
+    ]
+    if not boxes:
+        return None
+    r0 = max(0, min(b[0].start for b in boxes) - pad)
+    c0 = max(0, min(b[1].start for b in boxes) - pad)
+    r1 = min(shape[0], max(b[0].stop for b in boxes) + pad)
+    c1 = min(shape[1], max(b[1].stop for b in boxes) + pad)
+    return r0, c0, r1, c1
+
+
+def _offset_geometry(measured: dict[str, Any], r0: int, c0: int, calibration) -> None:
+    """Move crop-relative centroids back into whole-image coordinates."""
+    measured["centroid_x_px"] += c0
+    measured["centroid_y_px"] += r0
+    if calibration.is_calibrated:
+        sx, sy = calibration.scales
+        measured["centroid_x_um"] += c0 * sx
+        measured["centroid_y_um"] += r0 * sy
+
+
+def _cluster_geometry_cropped(
+    labels: np.ndarray, member_ids, window, calibration: Calibration,
+    contact_distance_px: int,
+) -> dict[str, Any]:
+    """:func:`_cluster_geometry` on a window of the image instead of all of it.
+
+    Every quantity is translation-invariant except the centroid, which is moved
+    back afterwards. The window is padded by twice the closing radius plus
+    one, so the morphological closing sees the same neighbourhood it would on
+    the full image; where the window is clipped, it is clipped by the image
+    edge, exactly as the full-image computation is. ``test_golden_equivalence``
+    holds this to the full-image result.
+    """
+    r0, c0, r1, c1 = window
+    crop = labels[r0:r1, c0:c1]
+    mask = _cluster_mask(crop, member_ids)
+    geometry = _cluster_geometry(mask, calibration, contact_distance_px)
+    if calibration.is_calibrated and calibration.is_isotropic:
+        # Physical centroids were derived from the crop-relative pixel ones.
+        sx, sy = calibration.scales
+        geometry["centroid_x_px"] += c0
+        geometry["centroid_y_px"] += r0
+        geometry["centroid_x_um"] = geometry["centroid_x_px"] * sx
+        geometry["centroid_y_um"] = geometry["centroid_y_px"] * sy
+    else:
+        _offset_geometry(geometry, r0, c0, calibration)
+    return geometry
 
 
 def _cluster_geometry(
@@ -483,6 +567,77 @@ def _member_summary(
     return summary
 
 
+class _MemberSummaries:
+    """:func:`_member_summary` for many clusters from one extraction of the table.
+
+    Selecting rows out of a DataFrame once per cluster dominated the cost of
+    crowded images. The statistics are identical: NaN-skipping mean and median,
+    and a sample SD that is NaN below two members, exactly as pandas computes
+    them for :func:`_member_summary`.
+    """
+
+    def __init__(self, cell_df: pd.DataFrame, calibration: Calibration):
+        self.calibrated = calibration.is_calibrated
+        metrics = _MEMBER_METRICS_PHYSICAL if self.calibrated else _MEMBER_METRICS_PIXEL
+        self.metrics = dict(metrics)
+        self.unit = "um" if self.calibrated else "px"
+        self.area_unit = "um2" if self.calibrated else "px2"
+        self.position: dict[int, int] = {}
+        self.columns: dict[str, np.ndarray] = {}
+        if cell_df is not None and len(cell_df):
+            self.position = {int(v): i for i, v in enumerate(cell_df["cell_id"].to_numpy())}
+            for column in list(self.metrics.values()) + list(_MEMBER_METRICS_SHAPE.values()):
+                if column in cell_df:
+                    self.columns[column] = cell_df[column].to_numpy(dtype=float)
+
+    def _values(self, column: str, index: np.ndarray) -> np.ndarray | None:
+        if not len(index) or column not in self.columns:
+            return None
+        return self.columns[column][index]
+
+    def for_members(self, resolved_ids) -> dict[str, Any]:
+        index = np.asarray(
+            sorted(self.position[i] for i in resolved_ids if i in self.position), dtype=np.intp
+        )
+        nan = float("nan")
+        summary: dict[str, Any] = {}
+        for name, column in self.metrics.items():
+            suffix = self.area_unit if name == "area" else self.unit
+            values = self._values(column, index)
+            summary[f"member_{name}_mean_{suffix}"] = _nan_stat(values, "mean")
+            if name == "area":
+                summary[f"member_{name}_median_{suffix}"] = _nan_stat(values, "median")
+                summary[f"member_{name}_sd_{suffix}"] = (
+                    _nan_stat(values, "sd") if values is not None and len(values) > 1 else nan
+                )
+        for name, column in _MEMBER_METRICS_SHAPE.items():
+            summary[f"member_{name}_mean"] = _nan_stat(self._values(column, index), "mean")
+        return summary
+
+
+def _nan_stat(values: np.ndarray | None, function: str) -> float:
+    """pandas' skipna statistics on a float array; NaN when there is no data.
+
+    Written out the way ``pandas.core.nanops`` computes them (sum over count;
+    sample variance from squared deviations), without building a Series for
+    every cluster.
+    """
+    if values is None or not len(values):
+        return float("nan")
+    finite = values[~np.isnan(values)]
+    count = len(finite)
+    if not count:
+        return float("nan")
+    if function == "median":
+        return float(np.median(finite))
+    mean = finite.sum(dtype=np.float64) / count
+    if function == "mean":
+        return float(mean)
+    if count < 2:
+        return float("nan")
+    return float(np.sqrt(((mean - finite) ** 2).sum(dtype=np.float64) / (count - 1)))
+
+
 def measure_clusters(
     labels: np.ndarray,
     objects: Iterable[ObjectRecord],
@@ -490,6 +645,7 @@ def measure_clusters(
     calibration: Calibration,
     cell_df: pd.DataFrame,
     contact_distance_px: int = 2,
+    cache: dict[tuple[int, ...], dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """One row per cluster (§11), including clusters that are wholly unresolved.
 
@@ -499,21 +655,36 @@ def measure_clusters(
     * ``member_*`` — summary statistics over its resolved constituent cells.
 
     They answer different questions and are never interchangeable.
+
+    Geometry is computed on a window around each cluster rather than the whole
+    image, which turns a cost of clusters x image area into one of total
+    cluster area. ``cache`` maps a cluster's member IDs to its geometry; a
+    cluster whose membership is unchanged by a QC edit keeps its entry. As with
+    :func:`measure_cells`, the caller discards the cache when the mask, the
+    calibration or the contact distance changes.
     """
+    from scipy import ndimage as ndi
+
     clusters = list(clusters)
     rows: list[dict[str, Any]] = []
+    labels = np.asarray(labels)
+    slices = ndi.find_objects(labels) if labels.size and labels.max() > 0 else []
+    pad = 2 * _closing_radius(contact_distance_px) + 1
+    summaries = _MemberSummaries(cell_df, calibration)
 
     for cluster in clusters:
-        mask = _cluster_mask(labels, cluster.member_ids)
-        if not mask.any():
+        window = _cluster_window(slices, cluster.member_ids, labels.shape, pad)
+        if window is None:
             continue
 
-        geometry = _cluster_geometry(mask, calibration, contact_distance_px)
-        members = (
-            cell_df[cell_df["cell_id"].isin(list(cluster.resolved_ids))]
-            if len(cell_df)
-            else cell_df
-        )
+        key = tuple(cluster.member_ids)
+        geometry = cache.get(key) if cache is not None else None
+        if geometry is None:
+            geometry = _cluster_geometry_cropped(
+                labels, cluster.member_ids, window, calibration, contact_distance_px
+            )
+            if cache is not None:
+                cache[key] = geometry
 
         row: dict[str, Any] = {
             "cluster_id": cluster.cluster_id,
@@ -531,7 +702,7 @@ def measure_clusters(
             else:
                 row[f"cluster_{key}"] = value
 
-        row.update(_member_summary(members, calibration))
+        row.update(summaries.for_members(cluster.resolved_ids))
         # Provenance, not a summary statistic -- deliberately NOT prefixed
         # ``member_``, which is reserved for per-cell summaries.
         row["constituent_object_ids"] = ";".join(str(i) for i in cluster.member_ids)

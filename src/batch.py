@@ -24,7 +24,7 @@ from typing import Any
 
 import pandas as pd
 
-from .pipeline import AnalysisResults, compute_results
+from .pipeline import AnalysisResults, compute_results, results_key
 from .qc import qc_log_dataframe
 from .types import AnalysisSession, BatchSession
 
@@ -121,6 +121,34 @@ def image_id_for(session: AnalysisSession) -> str:
     return session.display_name
 
 
+def batch_key(batch: BatchSession) -> tuple:
+    """Changes whenever any pooled table could change.
+
+    Built from each image's results key plus the labels the tables carry, so a
+    memoised table can never be served after an edit.
+    """
+    return tuple(
+        (s.analysis_id, s.has_segmentation, results_key(s), s.well, s.reviewed, s.error,
+         s.display_name)
+        for s in batch.images
+    )
+
+
+def memoised(batch: BatchSession, name: str, compute):
+    """Return ``compute()``, reusing the previous value while the batch is unchanged.
+
+    Callers get the cached object itself, so they must treat it as read-only.
+    """
+    key = batch_key(batch)
+    cache = batch.derived_cache
+    entry = cache.get(name)
+    if entry is not None and entry[0] == key:
+        return entry[1]
+    value = compute()
+    cache[name] = (key, value)
+    return value
+
+
 def results_for(batch: BatchSession) -> list[tuple[AnalysisSession, AnalysisResults]]:
     """Compute (or reuse cached) results for every segmented image."""
     out = []
@@ -146,25 +174,32 @@ def pooled_cells(batch: BatchSession) -> pd.DataFrame:
     This is the batch population: the input to the headline statistics and to
     every distribution plot.
     """
-    frames = [_tag(results.cells, session) for session, results in results_for(batch)]
-    frames = [f for f in frames if len(f)]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    def compute():
+        frames = [_tag(results.cells, session) for session, results in results_for(batch)]
+        frames = [f for f in frames if len(f)]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    return memoised(batch, "pooled_cells", compute)
 
 
 def pooled_clusters(batch: BatchSession) -> pd.DataFrame:
     """Every cluster from every image, tagged with its origin."""
-    frames = [
-        _tag(results.cluster_summary, session) for session, results in results_for(batch)
-    ]
-    frames = [f for f in frames if len(f)]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    def compute():
+        frames = [
+            _tag(results.cluster_summary, session) for session, results in results_for(batch)
+        ]
+        frames = [f for f in frames if len(f)]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    return memoised(batch, "pooled_clusters", compute)
 
 
 def per_image_summary(batch: BatchSession) -> pd.DataFrame:
     """One row per image -- the QC view, not a second result."""
+    results = results_for(batch)
     rows = []
-    for session, results in results_for(batch):
-        row = results.image_summary.copy()
+    for session, result in results:
+        row = result.image_summary.copy()
         row.insert(0, "image_id", image_id_for(session))
         row.insert(1, "well", session.well)
         row.insert(2, "reviewed", session.reviewed)
@@ -173,7 +208,7 @@ def per_image_summary(batch: BatchSession) -> pd.DataFrame:
         return pd.DataFrame()
     frame = pd.concat(rows, ignore_index=True)
     if "error" not in frame.columns:
-        frame["error"] = [s.error for s, _ in results_for(batch)]
+        frame["error"] = [s.error for s, _ in results]
     return frame
 
 

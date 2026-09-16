@@ -14,7 +14,8 @@ from . import types
 SCHEMA = 1
 REGISTRY = {name: cls for name, cls in vars(types).items()
             if isinstance(cls, type) and is_dataclass(cls)}
-SKIP = {"results_cache", "reference_detection", "undo_stack", "redo_stack"}
+SKIP = {"results_cache", "geometry_cache", "view_cache", "derived_cache",
+        "reference_detection", "undo_stack", "redo_stack"}
 
 
 def save_project(batch, path, *, compression_level=6):

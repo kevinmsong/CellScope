@@ -248,6 +248,38 @@ def _cache_key(session: AnalysisSession):
     )
 
 
+def results_key(session: AnalysisSession):
+    """A key that changes whenever :func:`compute_results` would change.
+
+    Other caches (overlays, tables, batch pools) build on this so that they can
+    never outlive the measurements they display.
+    """
+    return (*_cache_key(session), id(session.object_labels))
+
+
+def _geometry_caches(session: AnalysisSession, use_cache: bool):
+    """Per-cell and per-cluster geometry caches for the current mask.
+
+    Geometry depends on the mask, the calibration and (for clusters) the
+    contact distance -- not on which *other* objects are excluded. The cache is
+    keyed on the label array itself (held by reference, so its identity cannot
+    be recycled) as well as the segmentation version.
+    """
+    if not use_cache:
+        return None, None
+    key = (
+        session.segmentation_version, session.calibration,
+        session.cluster_params.contact_distance_px,
+    )
+    cached = session.geometry_cache
+    if cached is not None and cached[0] == key and cached[1] is session.object_labels:
+        return cached[2], cached[3]
+    cells: dict = {}
+    clusters: dict = {}
+    session.geometry_cache = (key, session.object_labels, cells, clusters)
+    return cells, clusters
+
+
 def compute_results(session: AnalysisSession, use_cache: bool = True) -> AnalysisResults:
     """Apply QC, rebuild clusters, and measure everything.
 
@@ -265,12 +297,14 @@ def compute_results(session: AnalysisSession, use_cache: bool = True) -> Analysi
             return cached_value
 
     qc_labels = apply_qc(session.object_labels, session.qc)
+    qc_labels.flags.writeable = False
     included = session.included_objects()
+    cell_cache, cluster_cache = _geometry_caches(session, use_cache)
 
     clusters, edges = build_clusters(
         qc_labels, included, session.cluster_params.contact_distance_px
     )
-    cells = measure_cells(qc_labels, included, clusters, session.calibration)
+    cells = measure_cells(qc_labels, included, clusters, session.calibration, cache=cell_cache)
     cluster_summary = measure_clusters(
         qc_labels,
         included,
@@ -278,6 +312,7 @@ def compute_results(session: AnalysisSession, use_cache: bool = True) -> Analysi
         session.calibration,
         cells,
         session.cluster_params.contact_distance_px,
+        cache=cluster_cache,
     )
     counts = qc_counts(session.objects, session.qc)
     summary = build_image_summary(session, cells, cluster_summary, clusters, counts)
@@ -294,6 +329,23 @@ def compute_results(session: AnalysisSession, use_cache: bool = True) -> Analysi
     )
     session.results_cache = (key, results)
     return results
+
+
+def excluded_cell_measurements(session: AnalysisSession) -> pd.DataFrame:
+    """Diagnostic geometry for excluded, resolved objects.
+
+    Shown during review so a researcher can see *why* a cell looked wrong. These
+    rows never enter an accepted-cell summary. They reuse the geometry cache,
+    which is valid because a cell's geometry depends only on its own mask.
+    """
+    if session.object_labels is None:
+        return pd.DataFrame()
+    excluded = [o for o in session.objects if not session.qc.is_included(o.object_id)]
+    if not excluded:
+        return pd.DataFrame()
+    cell_cache, _ = _geometry_caches(session, True)
+    return measure_cells(session.object_labels, excluded, [], session.calibration,
+                         cache=cell_cache)
 
 
 def _stat(series, function: str) -> float:

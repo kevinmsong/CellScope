@@ -17,9 +17,9 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 
 import numpy as np
+from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
-from skimage import measure as skmeasure
 from skimage.morphology import binary_dilation, disk
 
 from .types import ClusterRecord, ObjectRecord
@@ -41,23 +41,25 @@ def build_cell_contact_graph(
     height, width = labels.shape[:2]
     radius = int(contact_distance_px)
     footprint = disk(radius) if radius > 0 else None
+    pad = radius + 1
 
     edges: set[tuple[int, int]] = set()
-    for prop in skmeasure.regionprops(labels):
-        label = int(prop.label)
-        min_row, min_col, max_row, max_col = prop.bbox
-        pad = radius + 1
-        r0, c0 = max(0, min_row - pad), max(0, min_col - pad)
-        r1, c1 = min(height, max_row + pad), min(width, max_col + pad)
+    if not labels.size or labels.max() <= 0:
+        return []
+    for index, window in enumerate(ndi.find_objects(labels)):
+        if window is None:
+            continue
+        label = index + 1
+        r0, c0 = max(0, window[0].start - pad), max(0, window[1].start - pad)
+        r1, c1 = min(height, window[0].stop + pad), min(width, window[1].stop + pad)
 
         crop = labels[r0:r1, c0:c1]
         own = crop == label
         reach = binary_dilation(own, footprint) if footprint is not None else own
 
-        for neighbour in np.unique(crop[reach]):
+        touched = crop[reach]
+        for neighbour in np.unique(touched[(touched != 0) & (touched != label)]):
             neighbour = int(neighbour)
-            if neighbour == 0 or neighbour == label:
-                continue
             edges.add((min(label, neighbour), max(label, neighbour)))
 
     return sorted(edges)
@@ -121,8 +123,10 @@ def build_clusters(
     the QC-approved label image, so excluded cells neither appear in a cluster
     nor hold two other cells together.
     """
+    from .morphometry import present_labels
+
     objects = list(objects)
-    present = {int(v) for v in np.unique(labels) if int(v) != 0}
+    present = present_labels(labels)
     live = [o for o in objects if o.object_id in present]
 
     edges = build_cell_contact_graph(labels, contact_distance_px)

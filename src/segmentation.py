@@ -275,13 +275,12 @@ def _relabel_sequential(labels: np.ndarray) -> np.ndarray:
 
 
 def _drop_small_labels(labels: np.ndarray, min_area: int) -> np.ndarray:
-    """Remove objects below ``min_area`` pixels."""
-    labels = np.asarray(labels).copy()
+    """Remove objects below ``min_area`` pixels, in one lookup-table pass."""
+    labels = np.asarray(labels)
     counts = np.bincount(labels.ravel())
-    for value, count in enumerate(counts):
-        if value != 0 and count < min_area:
-            labels[labels == value] = 0
-    return labels
+    keep = np.arange(len(counts), dtype=labels.dtype)
+    keep[counts < min_area] = 0
+    return keep[labels]
 
 
 def segment_with_threshold_watershed(image, params):

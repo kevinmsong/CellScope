@@ -93,7 +93,9 @@ def _resize_labels(labels: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """Nearest-neighbour resize, which preserves label values exactly."""
     if labels.shape[:2] == shape:
         return labels
-    resized = Image.fromarray(labels.astype(np.int32), mode="I").resize(
+    # int32 arrays become PIL mode "I" without being told (the explicit ``mode``
+    # argument is deprecated in Pillow 11).
+    resized = Image.fromarray(np.ascontiguousarray(labels, dtype=np.int32)).resize(
         (shape[1], shape[0]), Image.NEAREST
     )
     return np.asarray(resized).astype(np.int32)
@@ -116,59 +118,155 @@ def make_overlay(
     """
     objects = list(objects)
     clusters = list(clusters)
-    base = np.asarray(display_rgb).astype(np.float32).copy()
+    base = np.asarray(display_rgb).astype(np.float32)
     if base.ndim == 2:
         base = np.repeat(base[:, :, None], 3, axis=2)
 
     small = _resize_labels(np.asarray(labels), base.shape[:2])
     categories = categorise(objects, clusters)
+    masks = _overlay_masks(small, categories, excluded_ids)
 
-    for category, colour in CATEGORY_COLOURS.items():
-        ids = [oid for oid, cat in categories.items() if cat == category]
-        if not ids:
-            continue
-        member = np.isin(small, np.asarray(ids, dtype=small.dtype))
-        if not member.any():
-            continue
-        tint = np.asarray(colour, dtype=np.float32)
-        base[member] = (1.0 - alpha) * base[member] + alpha * tint
-        edge = find_boundaries(np.where(member, small, 0), mode="inner")
-        if category == "unresolved" and UNRESOLVED_BOUNDARY_WIDTH > 1:
-            edge = binary_dilation(
-                edge, np.ones((UNRESOLVED_BOUNDARY_WIDTH, UNRESOLVED_BOUNDARY_WIDTH), bool)
-            ) & member
-        base[edge] = tint
-
-    excluded = np.isin(small, list(excluded_ids))
-    if excluded.any():
-        base[excluded] *= 0.35
-        edge = find_boundaries(np.where(excluded, small, 0), mode="inner")
-        base[edge] = (160, 160, 160)
+    if masks.member.any():
+        tinted = (1.0 - alpha) * base + alpha * masks.tint
+        base = np.where(masks.member[..., None], tinted, base)
+    base = np.where(masks.edge[..., None], masks.tint, base)
+    if masks.excluded.any():
+        base = np.where(masks.excluded[..., None], base * 0.35, base)
+        base = np.where(masks.excluded_edge[..., None], _EXCLUDED_EDGE, base)
     image = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8))
     if show_cell_ids or show_cluster_ids:
         _draw_ids(image, small, objects, clusters, categories, show_cell_ids, show_cluster_ids)
     return np.asarray(image)
 
 
+_CATEGORY_ORDER = ("isolated", "clustered", "unresolved")
+_EXCLUDED_EDGE = np.asarray((160, 160, 160), dtype=np.float32)
+_CATEGORY_TINTS = np.asarray(
+    [(0, 0, 0)] + [CATEGORY_COLOURS[c] for c in _CATEGORY_ORDER], dtype=np.float32
+)
+
+
+class _Masks:
+    """Per-pixel overlay masks, computed with lookup tables in whole-image passes.
+
+    Equivalent to testing each category's IDs with ``np.isin`` and running
+    ``find_boundaries`` on each masked image: an inner boundary pixel is one
+    whose 4-neighbourhood holds any other value, and masking only ever replaces
+    *other* labels, so the boundary of a subset is the full boundary restricted
+    to that subset. ``test_golden_equivalence`` checks this pixel for pixel.
+    """
+
+    __slots__ = ("category", "edge", "excluded", "excluded_edge", "member", "tint")
+
+
+def _overlay_masks(small: np.ndarray, categories: dict[int, str], excluded_ids) -> _Masks:
+    top = int(small.max()) if small.size else 0
+    table = np.zeros(top + 1, np.uint8)
+    for object_id, category in categories.items():
+        if 0 < object_id <= top:
+            table[object_id] = _CATEGORY_ORDER.index(category) + 1
+    excluded_table = np.zeros(top + 1, bool)
+    excluded_list = [int(i) for i in excluded_ids if 0 <= int(i) <= top]
+    excluded_table[excluded_list] = True
+
+    masks = _Masks()
+    masks.category = table[small]
+    masks.member = masks.category > 0
+    masks.tint = _CATEGORY_TINTS[masks.category]
+    masks.excluded = excluded_table[small]
+    boundary = (
+        find_boundaries(small, mode="inner")
+        if (masks.member.any() or masks.excluded.any()) else np.zeros(small.shape, bool)
+    )
+    edge = boundary & masks.member
+    unresolved = masks.category == _CATEGORY_ORDER.index("unresolved") + 1
+    if UNRESOLVED_BOUNDARY_WIDTH > 1 and unresolved.any():
+        thick = binary_dilation(
+            edge & unresolved,
+            np.ones((UNRESOLVED_BOUNDARY_WIDTH, UNRESOLVED_BOUNDARY_WIDTH), bool),
+        ) & unresolved
+        edge = edge | thick
+    masks.edge = edge
+    masks.excluded_edge = boundary & masks.excluded
+    return masks
+
+
+def overlay_layers(
+    shape: tuple[int, int],
+    labels: np.ndarray,
+    objects: Iterable,
+    clusters: Iterable,
+    show_cell_ids: bool = True,
+    show_cluster_ids: bool = False,
+    excluded_ids: Iterable[int] = (),
+    selected_id: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The overlay as two RGBA layers for a browser to composite.
+
+    ``fill`` carries the category tints at full opacity; the viewer shows it at
+    the chosen overlay opacity, which reproduces :func:`make_overlay`'s blend
+    without a server round trip. ``lines`` carries everything drawn opaque --
+    boundaries, the dimming of excluded cells, IDs, and the selected cell.
+    """
+    objects = list(objects)
+    clusters = list(clusters)
+    small = _resize_labels(np.asarray(labels), tuple(shape[:2]))
+    categories = categorise(objects, clusters)
+    masks = _overlay_masks(small, categories, excluded_ids)
+
+    fill = np.zeros((*small.shape, 4), np.uint8)
+    fill[..., :3] = masks.tint.astype(np.uint8)
+    fill[..., 3] = np.where(masks.member, 255, 0)
+
+    lines = np.zeros((*small.shape, 4), np.uint8)
+    lines[masks.excluded] = (0, 0, 0, 166)             # base x 0.35
+    lines[masks.edge, :3] = masks.tint[masks.edge].astype(np.uint8)
+    lines[masks.edge, 3] = 255
+    lines[masks.excluded_edge] = (160, 160, 160, 255)
+    if selected_id:
+        _draw_selection(lines, small, int(selected_id))
+
+    image = Image.fromarray(lines, "RGBA")
+    if show_cell_ids or show_cluster_ids:
+        _draw_ids(image, small, objects, clusters, categories, show_cell_ids, show_cluster_ids)
+    return fill, np.asarray(image)
+
+
+def _draw_selection(lines: np.ndarray, small: np.ndarray, selected_id: int) -> None:
+    """A thick two-tone outline around one object, drawn inside its bounding box."""
+    from scipy import ndimage as ndi
+
+    rows, cols = np.nonzero(small == selected_id)
+    if not len(rows):
+        return
+    r0, r1 = max(0, rows.min() - 3), min(small.shape[0], rows.max() + 4)
+    c0, c1 = max(0, cols.min() - 3), min(small.shape[1], cols.max() + 4)
+    own = small[r0:r1, c0:c1] == selected_id
+    outer = ndi.binary_dilation(own, iterations=3) & ~ndi.binary_dilation(own, iterations=1)
+    inner = find_boundaries(own, mode="inner")
+    window = lines[r0:r1, c0:c1]
+    window[outer] = (0, 0, 0, 255)
+    window[inner] = (255, 255, 255, 255)
+
+
 def _centroids(small_labels: np.ndarray, ids: Sequence[int]) -> dict[int, tuple[float, float]]:
     """Centroid of each label in display coordinates, computed in one pass."""
     centroids: dict[int, tuple[float, float]] = {}
-    if not len(ids):
+    if not len(ids) or not small_labels.size:
         return centroids
+    # Coordinate sums are integers, exact in float64, so these means equal
+    # the per-object ``mean()`` of pixel coordinates bit for bit.
     flat = small_labels.ravel()
-    order = np.argsort(flat, kind="stable")
-    sorted_flat = flat[order]
     height, width = small_labels.shape
+    counts = np.bincount(flat)
+    cols = np.bincount(flat, weights=np.tile(np.arange(width, dtype=np.float64), height))
+    rows = np.bincount(flat, weights=np.repeat(np.arange(height, dtype=np.float64), width))
     for object_id in ids:
-        left = np.searchsorted(sorted_flat, object_id, side="left")
-        right = np.searchsorted(sorted_flat, object_id, side="right")
-        if right <= left:
-            continue
-        positions = order[left:right]
-        centroids[object_id] = (
-            float((positions % width).mean()),
-            float((positions // width).mean()),
-        )
+        if 0 < object_id < len(counts) and counts[object_id]:
+            centroids[object_id] = (
+                float(cols[object_id] / counts[object_id]),
+                float(rows[object_id] / counts[object_id]),
+            )
     return centroids
 
 
