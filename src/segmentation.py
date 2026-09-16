@@ -250,7 +250,7 @@ def _is_out_of_memory(error: BaseException) -> bool:
         if isinstance(error, torch.cuda.OutOfMemoryError):
             return True
     except ImportError:
-        return False
+        pass                        # fall back to the message, as older CUDA errors need
     return "out of memory" in str(error).lower()
 
 
