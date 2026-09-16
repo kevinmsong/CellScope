@@ -103,7 +103,7 @@ def workflow_state(batch) -> tuple[list[Step], str]:
     n = len(images)
     if not n:
         steps = [Step(k, label, "current" if k == "import" else "todo") for k, label in STEP_LABELS]
-        return steps, "Add images on the Batch tab to start an experiment."
+        return steps, "Add images on the Import tab to start an experiment."
 
     from .review import validate_review
 
@@ -167,7 +167,7 @@ def workflow_state(batch) -> tuple[list[Step], str]:
 
     # One instruction, the most important first.
     if not calibrated and not confirmed:
-        action = ("Calibrate on the Batch tab (a scale bar or µm/px), or confirm pixel "
+        action = ("Calibrate on the Import tab (a scale bar or µm/px), or confirm pixel "
                   "units, before measuring.")
     elif calibrated and len(calibrated) != n:
         action = ("Calibrate the remaining {} so the batch shares one unit."

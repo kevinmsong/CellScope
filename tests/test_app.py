@@ -603,9 +603,27 @@ def test_review_click_background_or_outside_is_noop(clickable_batch, point):
 
 
 def test_click_callback_wired_to_review_outputs(clickable_batch):
+    """Review clicks arrive from the browser viewer as display-pixel coordinates."""
+    payload = '{"x": 4, "y": 3}'
+    for dependency in _outputs_for("on_canvas_click"):
+        returned = cellscope_app.on_canvas_click(payload, True, False, clickable_batch)
+        assert len(returned) == len(dependency.outputs)
+    assert clickable_batch.active.qc.excluded_ids == {1}
+
+
+def test_canvas_click_matches_a_select_event(clickable_batch):
+    session = clickable_batch.active
+    cellscope_app.on_canvas_click('{"x": 4, "y": 3}', True, False, clickable_batch)
+    via_canvas = set(session.qc.excluded_ids)
     event = gradio.SelectData(None, {"index": [4, 3], "value": None})
-    for dependency in _outputs_for("on_review_click"):
-        assert len(cellscope_app.on_review_click(True, False, clickable_batch, event)) == len(dependency.outputs)
+    cellscope_app.on_review_click(True, False, clickable_batch, event)
+    assert via_canvas == {1} and session.qc.excluded_ids == set()
+
+
+@pytest.mark.parametrize("payload", ["", "not json", '{"x": 1}', '{"x": "a", "y": 2}'])
+def test_malformed_canvas_clicks_are_ignored(clickable_batch, payload):
+    cellscope_app.on_canvas_click(payload, True, False, clickable_batch)
+    assert not clickable_batch.active.qc.log
 
 
 def test_theme_has_distinct_dark_surfaces():

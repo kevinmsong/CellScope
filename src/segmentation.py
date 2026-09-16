@@ -18,6 +18,7 @@ selected, so the channel recorded in metadata is provably the one segmented.
 from __future__ import annotations
 
 import math
+import os
 import threading
 from typing import Any
 
@@ -69,7 +70,8 @@ def cellpose_version() -> str | None:
 
 
 def _resolve_device(use_gpu: bool) -> bool:
-    if not use_gpu:
+    # ``cellscope --cpu`` sets this so a machine with a GPU can still run on the CPU.
+    if not use_gpu or os.environ.get("CELLSCOPE_FORCE_CPU") == "1":
         return False
     try:
         import torch
