@@ -17,15 +17,16 @@ from .results_tab import round_frame
 from .theme import callout, section
 from .views import locked, status_html
 
-DESIGN_COLUMNS = ["Image", "Well", "Condition", "Biological replicate"]
+#: "#" matches the image table: file names repeat across condition folders.
+DESIGN_COLUMNS = ["#", "Image", "Well", "Condition", "Biological replicate"]
 METRIC_CHOICES = [(label, key) for key, (label, _, _) in DESIGN_METRICS.items()]
 
 
 def design_table(batch) -> pd.DataFrame:
     if batch is None:
         return pd.DataFrame(columns=DESIGN_COLUMNS)
-    return pd.DataFrame([[s.display_name, s.well, s.condition, s.replicate] for s in batch.images],
-                        columns=DESIGN_COLUMNS)
+    return pd.DataFrame([[i, s.display_name, s.well, s.condition, s.replicate]
+                         for i, s in enumerate(batch.images, start=1)], columns=DESIGN_COLUMNS)
 
 
 def _status_note(summary, batch) -> str:
@@ -74,10 +75,11 @@ def on_quality(metric, batch):
 def on_save_design(table, metric, batch):
     frame = pd.DataFrame(table)
     if batch is None or len(frame) != len(batch.images) or \
-            list(frame.iloc[:, 0]) != [s.display_name for s in batch.images]:
+            list(frame["Image"]) != [s.display_name for s in batch.images]:
         return (*on_quality(metric, batch), "The image list changed; refresh before editing the design.")
-    for session, row in zip(batch.images, frame.fillna("").itertuples(index=False, name=None)):
-        session.well, session.condition, session.replicate = [str(v).strip() for v in row[1:4]]
+    for session, (_, row) in zip(batch.images, frame.fillna("").iterrows()):
+        session.well, session.condition, session.replicate = [
+            str(row[c]).strip() for c in ("Well", "Condition", "Biological replicate")]
     return (*on_quality(metric, batch), "Experimental design saved.")
 
 

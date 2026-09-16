@@ -125,7 +125,7 @@ def viewer_html(session, show_ids: bool = True, show_clusters: bool = False,
                 annotation=session.annotation,
             )
             if session.correction_points:
-                _draw_points(lines, session, (height, width))
+                lines = _draw_points(lines, session, (height, width))
             return _png(fill), _png(lines)
 
         fill_uri, lines_uri = _cache(session, layer_key, build_layers)
@@ -182,10 +182,11 @@ def viewer_html(session, show_ids: bool = True, show_clusters: bool = False,
     )
 
 
-def _draw_points(lines: np.ndarray, session, shape) -> None:
+def _draw_points(lines: np.ndarray, session, shape) -> np.ndarray:
+    """Correction points drawn on a copy of the line layer."""
     from PIL import ImageDraw
 
-    image = Image.fromarray(lines, "RGBA")
+    image = Image.fromarray(np.array(lines), "RGBA")
     draw = ImageDraw.Draw(image)
     scale_x = shape[1] / session.object_labels.shape[1]
     scale_y = shape[0] / session.object_labels.shape[0]
@@ -196,7 +197,7 @@ def _draw_points(lines: np.ndarray, session, shape) -> None:
         draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(250, 204, 21, 255))
         draw.text((x + 4, y + 4), str(index), fill=(250, 204, 21, 255),
                   stroke_width=1, stroke_fill=(0, 0, 0, 255))
-    lines[:] = np.asarray(image)
+    return np.asarray(image)
 
 
 def parse_click(payload: str) -> tuple[int, int] | None:

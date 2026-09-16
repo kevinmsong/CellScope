@@ -134,9 +134,14 @@ def push_params(batch, params, to_all: bool) -> None:
 
 def _would_change(session, params) -> bool:
     """Would these settings produce different masks for this image?"""
+    if not session.has_segmentation:
+        return False
     probe = copy.copy(session)
     _with_params(probe, params, keep_nuclear=True)
-    return session.has_segmentation and segmentation_fingerprint(probe) != session.segmented_with
+    # Projects from 0.1 did not record what was used; assume the image's
+    # current settings are the ones its masks came from.
+    used = session.segmented_with or segmentation_fingerprint(session)
+    return segmentation_fingerprint(probe) != used
 
 
 def on_settings_changed(*args):

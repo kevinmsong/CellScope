@@ -436,3 +436,23 @@ def test_status_contains_the_stepper(batch):
     html = views.status_html(batch)
     assert 'class="cs-steps"' in html and "cs-next" in html
     assert html.count('<li class="cs-step ') == 6
+
+
+def test_correction_points_render_and_survive_further_actions(batch):
+    session = batch.images[0]
+    session.review_mode = "Collect correction points"
+    for x, y in ((10, 10), (40, 12), (25, 40)):
+        out = review_tab.on_canvas_click(json.dumps({"x": x, "y": y}), True, False, batch)
+        assert "Point" in out[3]
+    assert len(session.correction_points) == 3
+    assert json.loads(out[10]) == [list(p) for p in session.correction_points]
+    review_tab.on_undo(True, False, batch)            # still renders with points present
+    review_tab.on_clear_correction_points(True, False, batch)
+    assert session.correction_points == []
+
+
+def test_settings_note_assumes_current_settings_for_old_projects(batch):
+    for s in batch.images:
+        s.segmented_with = ""                        # as loaded from a 0.1 project
+    assert "match" in segment_tab.on_settings_changed(*_widgets_with(), batch)
+    assert "2 of 2" in segment_tab.on_settings_changed(*_widgets_with(flow=1.2), batch)
