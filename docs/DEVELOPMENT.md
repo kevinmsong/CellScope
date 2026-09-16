@@ -18,10 +18,27 @@ CPU-only Linux runner without Cellpose.
 on biological data. Validate settings against manually reviewed images before
 relying on automated counts.
 
-**Real-app check.** Before a release, drive the app itself: launch
-`python -m cellscope`, run a Cellpose batch, review with zoom and shortcuts,
-then export and save. The browser-side viewer is not covered by the Python
-tests.
+**End-to-end test.** `tests/e2e/test_browser.py` starts the real app and drives
+it in headless Chromium through the whole workflow on synthetic fields. It
+covers:
+
+- calibrating from a burned-in bar;
+- preview and keep, then a batch run;
+- in review: inspect, wheel zoom anchored at the cursor, pan and opacity with
+  no server requests, exclude, undo/redo, keyboard shortcuts and a split;
+- design, results and export;
+- save and reopen;
+- dark theme.
+
+It skips when Playwright is not installed, as on CI. To run it:
+
+```powershell
+python -m playwright install chromium
+python -m pytest tests/e2e -q
+```
+
+**Before a release,** also run a Cellpose batch on real images in the app
+itself.
 
 ## Architecture
 

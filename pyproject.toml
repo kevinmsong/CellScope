@@ -45,6 +45,7 @@ include = ["src", "cellscope", "cellscope.*"]
 pythonpath = ["."]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["e2e: drives the real app in a headless browser (needs Playwright + Chromium)"]
 
 [tool.ruff]
 line-length = 100

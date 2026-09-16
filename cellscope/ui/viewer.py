@@ -226,6 +226,14 @@ VIEWER_JS = r"""
     field.dispatchEvent(new Event('input', { bubbles: true }));
   };
 
+  // The page may be scaled with CSS zoom: pointer and bounding-box
+  // coordinates are then in screen pixels, while layout sizes and transforms
+  // are in CSS pixels. ``k`` converts screen pixels to CSS pixels' size.
+  function pageZoom(port) {
+    const rect = port.getBoundingClientRect();
+    return port.clientWidth ? rect.width / port.clientWidth : 1;
+  }
+
   function stateOf(viewer) {
     try { return JSON.parse(viewer.dataset.state || '{}'); } catch (_) { return {}; }
   }
@@ -250,7 +258,7 @@ VIEWER_JS = r"""
     stage.style.setProperty('--cs-alpha', alpha);
     stage.style.imageRendering = scale >= 1.5 ? 'pixelated' : 'auto';
     const label = viewer.querySelector('.cs-zoom');
-    if (label) label.textContent = Math.round(scale * 100) + '%';
+    if (label) label.textContent = Math.round(scale * pageZoom(port) * 100) + '%';
     const slider = viewer.querySelector('input[data-act=alpha]');
     if (slider) slider.value = Math.round(alpha * 100);
     viewer.classList.toggle('original', original);
@@ -264,14 +272,21 @@ VIEWER_JS = r"""
     if (!view) return;
     const port = viewer.querySelector('.cs-viewport');
     const rect = port.getBoundingClientRect();
-    const px = cx === undefined ? rect.width / 2 : cx - rect.left;
-    const py = cy === undefined ? rect.height / 2 : cy - rect.top;
+    const k = pageZoom(port);
+    const px = (cx === undefined ? rect.width / 2 : cx - rect.left) / k;
+    const py = (cy === undefined ? rect.height / 2 : cy - rect.top) / k;
     const before = view.fit * view.zoom;
     view.zoom = Math.min(32, Math.max(1, view.zoom * factor));
     const after = view.fit * view.zoom;
     view.x = (view.x + px) * after / before - px;
     view.y = (view.y + py) * after / before - py;
     apply(viewer);
+  }
+
+  function actual(viewer) {
+    const view = views[stateOf(viewer).key];
+    const k = pageZoom(viewer.querySelector('.cs-viewport'));
+    zoomAt(viewer, (1 / (view.fit * k)) / view.zoom);
   }
 
   function imagePoint(viewer, event) {
@@ -349,7 +364,8 @@ VIEWER_JS = r"""
         drag.moved = true;
         viewer.classList.add('panning');
         const view = views[stateOf(viewer).key];
-        view.x -= dx; view.y -= dy;
+        const k = pageZoom(port);
+        view.x -= dx / k; view.y -= dy / k;
         drag.x = e.clientX; drag.y = e.clientY;
         apply(viewer);
         return;
@@ -373,7 +389,7 @@ VIEWER_JS = r"""
       if (act === 'in') zoomAt(viewer, 1.5);
       else if (act === 'out') zoomAt(viewer, 1 / 1.5);
       else if (act === 'fit') { Object.assign(views[stateOf(viewer).key], { zoom: 1, x: 0, y: 0 }); apply(viewer); }
-      else if (act === 'actual') { const v = views[stateOf(viewer).key]; zoomAt(viewer, (1 / v.fit) / v.zoom); }
+      else if (act === 'actual') { actual(viewer); }
       else if (act === 'original') { original = !original; refreshAll(); }
     });
     viewer.querySelector('input[data-act=alpha]').addEventListener('input', (e) => {
@@ -426,7 +442,7 @@ VIEWER_JS = r"""
     else if (key === 'f' || key === 'F') { const v = views[stateOf(viewer).key]; Object.assign(v, { zoom: 1, x: 0, y: 0 }); apply(viewer); }
     else if (key === '+' || key === '=') zoomAt(viewer, 1.5);
     else if (key === '-' || key === '_') zoomAt(viewer, 1 / 1.5);
-    else if (key === '1') { const v = views[stateOf(viewer).key]; zoomAt(viewer, (1 / v.fit) / v.zoom); }
+    else if (key === '1') actual(viewer);
     else if (key === 'o' || key === 'O') { original = !original; refreshAll(); }
     else if (key === '?') { const help = document.getElementById('cs-shortcuts'); if (help) help.querySelector('button, .label-wrap')?.click(); }
     else handled = false;
