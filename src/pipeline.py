@@ -13,7 +13,7 @@ for provenance.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import Any
 
@@ -23,9 +23,11 @@ import pandas as pd
 from .clustering import build_clusters
 from .morphometry import measure_cells, measure_clusters
 from .preprocessing import preprocess_image
-from .qc import apply_qc, exclude_border_touching, qc_counts
+from .qc import apply_automatic_qc, apply_qc, exclusion_counts, qc_counts
+from .scalebar import annotation_touching_ids, detect_annotation
 from .segmentation import segment_cells, split_touching_cells
 from .types import AnalysisSession, ClusterRecord, ObjectRecord
+from .workflow import segmentation_fingerprint
 
 
 @dataclass
@@ -71,12 +73,18 @@ def run_segmentation(
         raw_labels, session.split_params, session.segmentation_params.min_object_area
     )
 
+    # The annotation is found on the original image, never on the preprocessed
+    # channel, and its detection changes no pixel that is segmented or measured.
+    annotation = detect_annotation(session.image.pixels) if session.image is not None else None
+    objects = flag_annotation_contact(object_labels, objects, annotation)
+
     raw_labels = np.asarray(raw_labels)
     raw_labels.flags.writeable = False
     object_labels.flags.writeable = False     # copy-on-write; see review.freeze_labels
     session.raw_labels = raw_labels
     session.object_labels = object_labels
     session.objects = objects
+    session.annotation = annotation
     session.engine_info = {**engine_info, "timings_seconds": {
         "preprocessing": round(prepared_at - started, 3),
         "segmentation": round(segmented_at - prepared_at, 3),
@@ -84,17 +92,39 @@ def run_segmentation(
         "total": round(perf_counter() - started, 3),
     }}
     session.qc.reset()
-    exclude_border_touching(session.qc, objects, reason="automatically excluded: touches image border")
+    apply_automatic_qc(session.qc, objects, session.qc_params)
     session.reviewed = False
     session.undo_stack.clear()
     session.redo_stack.clear()
     session.correction_points.clear()
     session.selected_object = 0
     session.segmented_channel = session.channel
+    session.segmented_with = segmentation_fingerprint(session)
     session.segmentation_version += 1
     session.results_cache = None
     session.error = ""
     return session
+
+
+def flag_annotation_contact(labels, objects, annotation) -> list[ObjectRecord]:
+    """Set ``touches_annotation`` on every object from the current mask."""
+    touching = annotation_touching_ids(labels, annotation)
+    return [
+        o if o.touches_annotation == (o.object_id in touching)
+        else replace(o, touches_annotation=o.object_id in touching)
+        for o in objects
+    ]
+
+
+def reapply_automatic_qc(session: AnalysisSession) -> dict[str, int]:
+    """Re-run the automatic exclusion rules after the QC settings changed.
+
+    Masks are untouched, and manual decisions -- exclusions and restorations --
+    are kept.
+    """
+    if not session.has_segmentation:
+        return {"excluded": 0, "restored": 0}
+    return apply_automatic_qc(session.qc, session.objects, session.qc_params)
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +422,7 @@ def build_image_summary(session, cells, cluster_summary, clusters, counts) -> pd
         "objects_detected": counts.get("objects_detected", 0),
         "objects_accepted": counts.get("objects_accepted", 0),
         "objects_excluded": counts.get("objects_excluded", 0),
+        **exclusion_counts(session.objects, session.qc),
         "cells_resolved": counts.get("cells_accepted", 0),
         "isolated_cells": sum(1 for c in clusters if c.status == "isolated_cell"),
         "cells_in_clusters": clustered_cells,

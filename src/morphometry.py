@@ -352,6 +352,7 @@ def measure_cells(
             "segmentation_status": obj.status,
         }
         row.update(geometry[obj.object_id])
+        row["touches_annotation"] = obj.touches_annotation
         row["split_from"] = obj.split_from if obj.split_from is not None else pd.NA
         row["raw_label"] = obj.raw_label if obj.raw_label is not None else pd.NA
         rows.append(row)
@@ -362,7 +363,7 @@ def measure_cells(
         + CELL_PIXEL_COLUMNS
         + (CELL_PHYSICAL_COLUMNS if calibration.is_calibrated else [])
         + CELL_SHAPE_COLUMNS
-        + ["touches_border", "split_from", "raw_label"]
+        + ["touches_border", "touches_annotation", "split_from", "raw_label"]
     )
     frame = pd.DataFrame(rows, columns=columns)
     return frame.sort_values("cell_id").reset_index(drop=True) if len(frame) else frame

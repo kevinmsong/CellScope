@@ -16,7 +16,14 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
-from .types import ClusterRecord, ObjectRecord, QCState
+from .types import ClusterRecord, ObjectRecord, QCParams, QCState
+
+#: Reasons recorded by the automatic rules. The border text predates the
+#: constant and is kept verbatim so existing logs keep their meaning.
+REASON_BORDER = "automatically excluded: touches image border"
+REASON_ANNOTATION = "automatically excluded: touches burned-in scale bar or caption"
+REASON_RULE_OFF = "automatic rule no longer applies"
+AUTOMATIC_REASONS = frozenset({REASON_BORDER, REASON_ANNOTATION})
 
 
 def apply_qc(labels: np.ndarray, qc_state: QCState) -> np.ndarray:
@@ -63,6 +70,82 @@ def exclude_border_touching(qc_state, objects, reason: str | None = None) -> int
         for obj in objects
         if obj.touches_border
     )
+
+
+def exclude_annotation_touching(qc_state, objects, reason: str = REASON_ANNOTATION) -> int:
+    """Exclude objects that touch a scale bar or caption burned into the image.
+
+    The annotation is drawn over the cells, so whatever lies under it is
+    hidden; such an object's morphology is truncated just as a border object's
+    is. Objects that *are* the bar or its glyphs are caught by the same rule.
+    """
+    return sum(
+        qc_state.exclude(obj.object_id, reason, scope="filter")
+        for obj in objects
+        if obj.touches_annotation
+    )
+
+
+def _last_actions(qc_state: QCState) -> dict[int, object]:
+    last = {}
+    for entry in qc_state.log:
+        if entry.object_id is not None:
+            last[int(entry.object_id)] = entry
+    return last
+
+
+def automatic_reason(obj: ObjectRecord, params: QCParams) -> str | None:
+    """The automatic rule that applies to an object, or ``None``."""
+    if params.exclude_border and obj.touches_border:
+        return REASON_BORDER
+    if params.exclude_annotations and obj.touches_annotation:
+        return REASON_ANNOTATION
+    return None
+
+
+def apply_automatic_qc(qc_state: QCState, objects, params: QCParams, only=None) -> dict[str, int]:
+    """Bring automatic exclusions in line with the current rules.
+
+    * An object a rule applies to is excluded -- unless the researcher restored
+      it by hand, which always wins.
+    * An object excluded *only* by an automatic rule that no longer applies (the
+      rule was switched off, or a correction moved the cell) is restored.
+    * Manual exclusions are never touched.
+
+    ``only`` limits the pass to some object IDs, as after a mask correction.
+    Returns how many objects were excluded and restored.
+    """
+    last = _last_actions(qc_state)
+    counts = {"excluded": 0, "restored": 0}
+    wanted = None if only is None else {int(i) for i in only}
+    for obj in objects:
+        if wanted is not None and obj.object_id not in wanted:
+            continue
+        reason = automatic_reason(obj, params)
+        previous = last.get(obj.object_id)
+        manually_restored = (
+            previous is not None and previous.action == "restore" and previous.scope != "filter"
+        )
+        if reason and not manually_restored:
+            counts["excluded"] += qc_state.exclude(obj.object_id, reason, scope="filter")
+        elif (
+            not reason
+            and obj.object_id in qc_state.excluded_ids
+            and previous is not None
+            and previous.action == "exclude"
+            and previous.reason in AUTOMATIC_REASONS
+        ):
+            counts["restored"] += qc_state.restore(obj.object_id, REASON_RULE_OFF, scope="filter")
+    return counts
+
+
+def exclusion_reasons(qc_state: QCState) -> dict[int, str]:
+    """Why each currently excluded object is excluded (its latest exclusion)."""
+    reasons = {}
+    for entry in qc_state.log:
+        if entry.object_id is not None and entry.action == "exclude":
+            reasons[int(entry.object_id)] = entry.reason
+    return {oid: reasons.get(oid, "") for oid in qc_state.excluded_ids}
 
 
 def exclude_by_area(qc_state, labels, min_area=None, max_area=None) -> int:
@@ -123,4 +206,15 @@ def qc_counts(objects: Sequence[ObjectRecord], qc_state: QCState) -> dict[str, i
         "objects_accepted": len(included),
         "cells_accepted": sum(1 for o in included if o.is_resolved),
         "unresolved_accepted": sum(1 for o in included if not o.is_resolved),
+    }
+
+
+def exclusion_counts(objects: Sequence[ObjectRecord], qc_state: QCState) -> dict[str, int]:
+    """Excluded objects broken down by why they were excluded."""
+    ids = {o.object_id for o in objects}
+    reasons = [r for oid, r in exclusion_reasons(qc_state).items() if oid in ids]
+    return {
+        "excluded_border": sum(1 for r in reasons if r == REASON_BORDER),
+        "excluded_annotation": sum(1 for r in reasons if r == REASON_ANNOTATION),
+        "excluded_other": sum(1 for r in reasons if r not in AUTOMATIC_REASONS),
     }

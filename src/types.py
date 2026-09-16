@@ -273,6 +273,59 @@ class ClusterParams:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class QCParams:
+    """Which automatic exclusions run after segmentation (§13).
+
+    Kept apart from the segmentation parameters on purpose: switching a QC rule
+    changes which objects are *accepted*, never the masks, so it must not mark a
+    segmentation as stale. Both rules are logged, shown on the overlay, and
+    reversible cell by cell.
+    """
+
+    #: Objects clipped by the field of view have truncated morphology.
+    exclude_border: bool = True
+    #: Objects touching a scale bar or caption burned into the image are
+    #: partly hidden behind it, so their morphology is truncated too.
+    exclude_annotations: bool = True
+
+    def describe(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, eq=False)
+class AnnotationDetection:
+    """A scale bar and caption burned into the data image, if one was found.
+
+    ``mask`` covers the annotation pixels, grown by ``margin_px``, and is stored
+    cropped to ``mask_bbox`` so it stays small. Bounding boxes are
+    ``(min_row, min_col, max_row, max_col)`` with exclusive maxima.
+    """
+
+    found: bool = False
+    colour: str = ""
+    bar_bbox: tuple[int, int, int, int] | None = None
+    caption_bbox: tuple[int, int, int, int] | None = None
+    mask_bbox: tuple[int, int, int, int] | None = None
+    mask: np.ndarray | None = None
+    margin_px: int = 0
+    bar_length_px: float = 0.0
+    note: str = ""
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "found": self.found,
+            "colour": self.colour,
+            "bar_bbox": list(self.bar_bbox) if self.bar_bbox else None,
+            "bar_length_px": self.bar_length_px,
+            "caption_bbox": list(self.caption_bbox) if self.caption_bbox else None,
+            "exclusion_region_bbox": list(self.mask_bbox) if self.mask_bbox else None,
+            "exclusion_margin_px": self.margin_px,
+            "annotation_pixels": int(self.mask.sum()) if self.mask is not None else 0,
+            "note": self.note,
+        }
+
+
 # --------------------------------------------------------------------------- #
 # Objects and clusters
 # --------------------------------------------------------------------------- #
@@ -292,6 +345,9 @@ class ObjectRecord:
     status: ObjectStatus
     split_from: int | None = None
     touches_border: bool = False
+    #: True when the object overlaps, or lies within the margin of, a scale bar
+    #: or caption burned into the image.
+    touches_annotation: bool = False
     #: True when the object looked like a possible merge (oversized, or low
     #: solidity). Recorded even when splitting is disabled, so the diagnostic
     #: survives the user's choice not to act on it.
@@ -434,6 +490,7 @@ class AnalysisSession:
     segmentation_params: SegmentationParams = field(default_factory=SegmentationParams)
     split_params: SplitParams = field(default_factory=SplitParams)
     cluster_params: ClusterParams = field(default_factory=ClusterParams)
+    qc_params: QCParams = field(default_factory=QCParams)
 
     #: Cellpose output, before splitting. Never mutated after assignment.
     raw_labels: np.ndarray | None = None
@@ -449,6 +506,13 @@ class AnalysisSession:
     #: Metadata must report this one, or it would claim a provenance that is not
     #: true of the masks it ships with.
     segmented_channel: Channel | None = None
+    #: Fingerprint of every input that shaped the current masks, captured when
+    #: segmentation ran (see :func:`src.workflow.segmentation_fingerprint`). A
+    #: mismatch with the current settings marks the image stale. Empty for
+    #: projects saved before this was recorded.
+    segmented_with: str = ""
+    #: Burned-in scale bar / caption found in this image at segmentation time.
+    annotation: AnnotationDetection | None = None
 
     #: (key, AnalysisResults) for the last computed results. Never read without
     #: an exact key match -- see :func:`src.pipeline.compute_results`.
@@ -576,6 +640,12 @@ class BatchSession:
     segmentation_params: SegmentationParams = field(default_factory=SegmentationParams)
     split_params: SplitParams = field(default_factory=SplitParams)
     cluster_params: ClusterParams = field(default_factory=ClusterParams)
+    qc_params: QCParams = field(default_factory=QCParams)
+    #: The researcher chose the calibration explicitly, including "work in
+    #: pixels". Distinguishes a deliberate pixel analysis from a forgotten step.
+    calibration_confirmed: bool = False
+    #: :func:`src.workflow.change_token` at the last export. Never saved.
+    exported_token: Any = field(default=None, repr=False, compare=False)
 
     #: Batch-level derived tables (pooled cells, summaries), keyed on every
     #: image's results key. Never saved.
@@ -588,6 +658,7 @@ class BatchSession:
         "segmentation_params",
         "split_params",
         "cluster_params",
+        "qc_params",
     )
 
     # -- membership ------------------------------------------------------ #

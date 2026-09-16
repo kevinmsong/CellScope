@@ -67,6 +67,7 @@ def build_metadata(session: AnalysisSession, results) -> dict[str, Any]:
             "flagged_suspicious": obj.flagged_suspicious,
             "unresolved_reason": obj.unresolved_reason,
             "touches_border": obj.touches_border,
+            "touches_annotation": obj.touches_annotation,
             "included": session.qc.is_included(obj.object_id),
         }
         for obj in session.objects
@@ -103,6 +104,8 @@ def build_metadata(session: AnalysisSession, results) -> dict[str, Any]:
         "segmentation_parameters": session.segmentation_params.describe(),
         "splitting_parameters": session.split_params.describe(),
         "clustering_parameters": session.cluster_params.describe(),
+        "automatic_qc": session.qc_params.describe(),
+        "burned_in_annotation": session.annotation.describe() if session.annotation else None,
         "calibration": calibration.describe(),
         "measurement": {
             "perimeter_estimator": perimeter_estimator_for(calibration),
@@ -295,6 +298,7 @@ def build_batch_metadata(batch, per_image: dict[str, Any]) -> dict[str, Any]:
             "segmentation": batch.segmentation_params.describe(),
             "splitting": batch.split_params.describe(),
             "clustering": batch.cluster_params.describe(),
+            "automatic_qc": batch.qc_params.describe(),
         },
         "images": per_image,
     }

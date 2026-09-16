@@ -7,14 +7,22 @@ import numpy as np
 from skimage.draw import polygon
 from skimage.segmentation import watershed
 
-from .types import ObjectRecord, utc_now
+from .types import ObjectRecord, QCParams, utc_now
 
 
 def signature(session):
+    """Hash of everything a review vouches for.
+
+    Groups added after the first release join the hash only when they differ
+    from their defaults, so a project reviewed before they existed stays
+    reviewed after an upgrade.
+    """
     values = [session.segmentation_version, session.qc.version, session.channel,
               session.calibration.describe(), session.segmentation_params.describe(),
               session.preprocess_params.describe(), session.split_params.describe(),
               session.cluster_params.describe()]
+    if session.qc_params != QCParams():
+        values.append(session.qc_params.describe())
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
@@ -119,20 +127,28 @@ def correct_mask(session, operation, ids, points):
         labels[rr, cc] = ids[0]
     else:
         raise ValueError("Unknown correction operation.")
+    from .pipeline import flag_annotation_contact
+    from .qc import apply_automatic_qc
+
     checkpoint(session)
     previous = {o.object_id: o for o in session.objects}
     objects = []
     border_ids = set(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    edited = set(ids) | {new_id}
     for oid in sorted(set(np.unique(labels)) - {0}):
         obj = previous.get(int(oid), ObjectRecord(int(oid), None, "resolved", split_from=ids[0]))
-        if oid in ids or oid == new_id:
+        if oid in edited:
             obj = replace(obj, status="resolved", touches_border=oid in border_ids, unresolved_reason=None)
         objects.append(obj)
+    objects = flag_annotation_contact(labels, objects, session.annotation)
     session.object_labels = freeze_labels(labels)
     session.objects = objects
     # Split children inherit their parent's inclusion decision.
     if operation == "Split" and ids[0] in session.qc.excluded_ids:
         session.qc.exclude(new_id, "inherits excluded split parent")
+    # An edited cell that now reaches the border or the ruler is excluded like
+    # any other; one the researcher restored by hand stays restored.
+    apply_automatic_qc(session.qc, objects, session.qc_params, only=edited)
     session.segmentation_version += 1
     session.results_cache = None
     session.edit_log.append({"action": operation, "ids": ids, "points": points, "timestamp": utc_now()})

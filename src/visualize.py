@@ -110,11 +110,14 @@ def make_overlay(
     show_cell_ids: bool = True,
     show_cluster_ids: bool = False,
     excluded_ids: Iterable[int] = (),
+    annotation=None,
 ) -> np.ndarray:
     """Draw masks, boundaries and IDs onto a display-sized RGB image.
 
     ``labels`` may be at full resolution; it is resized to the display grid with
-    nearest-neighbour interpolation so IDs survive intact.
+    nearest-neighbour interpolation so IDs survive intact. ``annotation`` (a
+    burned-in scale bar) is outlined with a dotted line marking the zone whose
+    contact excludes a cell.
     """
     objects = list(objects)
     clusters = list(clusters)
@@ -133,10 +136,34 @@ def make_overlay(
     if masks.excluded.any():
         base = np.where(masks.excluded[..., None], base * 0.35, base)
         base = np.where(masks.excluded_edge[..., None], _EXCLUDED_EDGE, base)
+    outline = annotation_outline(annotation, labels.shape[:2] if hasattr(labels, "shape") else None,
+                                 small.shape)
+    if outline is not None:
+        base = np.where(outline[..., None], _EXCLUDED_EDGE, base)
     image = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8))
     if show_cell_ids or show_cluster_ids:
         _draw_ids(image, small, objects, clusters, categories, show_cell_ids, show_cluster_ids)
     return np.asarray(image)
+
+
+def annotation_outline(annotation, full_shape, display_shape) -> np.ndarray | None:
+    """A dotted outline of a burned-in annotation's exclusion zone, at display size."""
+    if annotation is None or not getattr(annotation, "found", False) or full_shape is None:
+        return None
+    from scipy import ndimage as ndi
+
+    r0, c0, r1, c1 = annotation.mask_bbox
+    zone = np.zeros(tuple(full_shape), bool)
+    zone[r0:r1, c0:c1] = annotation.mask[: r1 - r0, : c1 - c0]
+    margin = max(1, int(annotation.margin_px))
+    yy, xx = np.mgrid[-margin : margin + 1, -margin : margin + 1]
+    zone[r0:r1, c0:c1] = ndi.binary_dilation(
+        zone[r0:r1, c0:c1], structure=(yy**2 + xx**2) <= margin**2
+    )
+    small = _resize_labels(zone.astype(np.int32), tuple(display_shape[:2])) > 0
+    edge = find_boundaries(small, mode="outer") & ~small
+    rows, cols = np.indices(edge.shape)
+    return edge & ((rows + cols) % 3 != 0)
 
 
 _CATEGORY_ORDER = ("isolated", "clustered", "unresolved")
@@ -200,6 +227,7 @@ def overlay_layers(
     show_cluster_ids: bool = False,
     excluded_ids: Iterable[int] = (),
     selected_id: int = 0,
+    annotation=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The overlay as two RGBA layers for a browser to composite.
 
@@ -223,6 +251,9 @@ def overlay_layers(
     lines[masks.edge, :3] = masks.tint[masks.edge].astype(np.uint8)
     lines[masks.edge, 3] = 255
     lines[masks.excluded_edge] = (160, 160, 160, 255)
+    outline = annotation_outline(annotation, np.asarray(labels).shape[:2], small.shape)
+    if outline is not None:
+        lines[outline] = (160, 160, 160, 255)
     if selected_id:
         _draw_selection(lines, small, int(selected_id))
 

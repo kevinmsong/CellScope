@@ -14,7 +14,7 @@ from . import types
 SCHEMA = 1
 REGISTRY = {name: cls for name, cls in vars(types).items()
             if isinstance(cls, type) and is_dataclass(cls)}
-SKIP = {"results_cache", "geometry_cache", "view_cache", "derived_cache",
+SKIP = {"results_cache", "geometry_cache", "view_cache", "derived_cache", "exported_token",
         "reference_detection", "undo_stack", "redo_stack"}
 
 
@@ -107,22 +107,35 @@ def load_project(path):
     return batch
 
 
+PRESET_SCHEMA = 2
+#: Parameter groups a preset of each schema must contain. Schema 1 predates
+#: the QC rules, which are then left at their defaults.
+PRESET_GROUPS = {
+    1: {"preprocess_params", "segmentation_params", "split_params", "cluster_params"},
+    2: {"preprocess_params", "segmentation_params", "split_params", "cluster_params",
+        "qc_params"},
+}
+
+
 def preset_dict(batch):
-    return {"schema": 1, "channel": batch.channel, "nuclear_channel": batch.nuclear_channel,
+    return {"schema": PRESET_SCHEMA, "channel": batch.channel,
+            "nuclear_channel": batch.nuclear_channel,
             "parameters": {name: {f.name: getattr(getattr(batch, name), f.name)
                                    for f in fields(getattr(batch, name))}
                            for name in batch.SHARED_PARAMS if name != "calibration"}}
 
 
 def apply_preset(batch, data):
-    if data.get("schema") != 1:
+    schema = data.get("schema")
+    if schema not in PRESET_GROUPS:
         raise ValueError("Unsupported preset version.")
     allowed_channels = {"grayscale", "red", "green", "blue"}
     if data.get("channel") not in allowed_channels or data.get("nuclear_channel") not in allowed_channels | {"none"}:
         raise ValueError("Preset contains an invalid channel.")
-    allowed_params = set(batch.SHARED_PARAMS) - {"calibration"}
-    if not isinstance(data.get("parameters"), dict) or set(data["parameters"]) != allowed_params:
-        raise ValueError("Preset must contain all four analysis parameter groups.")
+    expected = PRESET_GROUPS[schema]
+    if not isinstance(data.get("parameters"), dict) or set(data["parameters"]) != expected:
+        raise ValueError("Preset must contain exactly these parameter groups: {}.".format(
+            ", ".join(sorted(expected))))
     # Validate all constructor fields before changing the batch.
     values = {name: type(getattr(batch, name))(**params)
               for name, params in data["parameters"].items()
