@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import gradio as gr
 import pandas as pd
 
+from src.autosave import Autosaver
+from src.autosave import recovery_path as _recovery_path
 from src.pipeline import compute_results, iter_batch_segmentation
 from src.project import apply_preset, load_project, preset_dict, save_project
 from src.quality import experimental_summary, readiness
@@ -17,18 +19,17 @@ from src.review import correct_mask, history
 PROJECTS = Path(__file__).resolve().parent / "projects"
 
 
+AUTOSAVER = Autosaver(PROJECTS)
+
+
 def recovery_path(batch):
-    # Sanitize imported IDs before constructing any local path.
-    import hashlib
-    key = hashlib.sha256(batch.batch_id.encode()).hexdigest()[:24]
-    return PROJECTS / (key + ".cellscope")
+    # Derived from a hash of the batch ID, never from user-supplied text.
+    return _recovery_path(PROJECTS, batch)
 
 
-def autosave(batch):
-    if batch is None or batch.is_empty:
-        return "Autosave: no images loaded."
-    path = save_project(batch, recovery_path(batch), compression_level=1)
-    return "Autosaved " + time.strftime("%H:%M:%S") + " — " + Path(path).name
+def autosave(batch, wait=False):
+    """Save in the background if anything changed; returns a status line."""
+    return AUTOSAVER.request(batch, wait=wait)
 
 
 def review_table(batch):
@@ -99,7 +100,7 @@ def build_tools(batch, review):
         c.download = gr.File(label="Project download")
         c.upload = gr.File(label="Open project", file_types=[".cellscope"], type="filepath")
         c.open = gr.Button("Open selected project")
-        c.recoveries = gr.Dropdown(label="Local recovery", choices=sorted(p.name for p in PROJECTS.glob("*.cellscope")))
+        c.recoveries = gr.Dropdown(label="Local recovery", choices=[r["name"] for r in AUTOSAVER.recoveries()])
         c.scan = gr.Button("Refresh recovery list")
         c.recover = gr.Button("Recover selected autosave")
         c.auto = gr.Checkbox(value=True, label="Autosave every 60 seconds")
@@ -143,18 +144,22 @@ def build_tools(batch, review):
             try:
                 if not b or b.is_empty:
                     raise ValueError("Load images first.")
-                return save_project(b, recovery_path(b)), "Project saved. Download it for a portable copy."
+                path = save_project(b, recovery_path(b))
+                AUTOSAVER.mark_clean(b, path)
+                return path, "Project saved. Download it for a portable copy."
             except Exception as exc:
                 return None, "Save failed: " + str(exc)
         def open_file(path, b):
             try:
                 if not path:
                     raise ValueError("Choose a project first.")
-                loaded = load_project(path)
+                notes = []
+                loaded = load_project(path, notes)
                 # Keep the currently open work recoverable before replacing it.
                 if b and not b.is_empty:
-                    autosave(b)
-                return loaded, "Project opened."
+                    autosave(b, wait=True)
+                AUTOSAVER.mark_clean(loaded)
+                return loaded, "Project opened." + "".join("  \n" + n for n in notes)
             except Exception as exc:
                 return b, "Open failed: " + str(exc)
         def recover(name, b):
@@ -180,7 +185,7 @@ def build_tools(batch, review):
             button.click(fn, [source, batch], [batch, c.note]).then(sync_nav, [batch], nav_outputs).then(
                 app.on_toggle_labels, [show_ids, show_clusters, batch], review_outputs).then(
                 app.on_refresh_results, [batch], results_outputs).then(params, [batch], param_widgets)
-        c.scan.click(lambda: gr.update(choices=sorted(p.name for p in PROJECTS.glob("*.cellscope"))), outputs=c.recoveries)
+        c.scan.click(lambda: gr.update(choices=[r["name"] for r in AUTOSAVER.recoveries()]), outputs=c.recoveries)
         def tick(enabled, b):
             try:
                 return autosave(b) if enabled else "Autosave paused."
