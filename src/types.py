@@ -15,6 +15,8 @@ Two invariants carry most of that weight:
 
 from __future__ import annotations
 
+import copy
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -660,6 +662,38 @@ class BatchSession:
         "cluster_params",
         "qc_params",
     )
+
+    # -- concurrency ----------------------------------------------------- #
+
+    _LOCK_GUARD = threading.Lock()
+
+    def lock(self) -> threading.RLock:
+        """Re-entrant lock for changes that must not interleave.
+
+        A batch run commits results from its own generator while the
+        interface keeps accepting review edits and a background autosave
+        snapshots the batch. Each takes this lock around its critical section.
+        It is not a dataclass field, so it is never saved or compared.
+        """
+        found = self.__dict__.get("_lock")
+        if found is None:
+            with BatchSession._LOCK_GUARD:
+                found = self.__dict__.setdefault("_lock", threading.RLock())
+        return found
+
+    def __deepcopy__(self, memo):
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            if key == "_lock":
+                continue
+            clone.__dict__[key] = copy.deepcopy(value, memo)
+        return clone
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_lock", None)
+        return state
 
     # -- membership ------------------------------------------------------ #
 

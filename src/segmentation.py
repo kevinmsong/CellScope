@@ -108,10 +108,16 @@ def _get_cellpose_model(model_name: str, use_gpu: bool):
             )
 
         try:
-            model = cp_models.CellposeModel(gpu=use_gpu, pretrained_model=model_name)
-        except TypeError:
-            # Cellpose 3.x keeps the class name but selects weights via model_type.
-            model = cp_models.CellposeModel(gpu=use_gpu, model_type=model_name)
+            try:
+                model = cp_models.CellposeModel(gpu=use_gpu, pretrained_model=model_name)
+            except TypeError:
+                # Cellpose 3.x keeps the class name but selects weights via model_type.
+                model = cp_models.CellposeModel(gpu=use_gpu, model_type=model_name)
+        except Exception as error:
+            raise CellposeUnavailable(
+                "Cellpose model {!r} could not be loaded: {}: {}".format(
+                    model_name, type(error).__name__, error)
+            ) from error
 
         _MODEL_CACHE[key] = model
         return model
@@ -204,9 +210,19 @@ def segment_with_cellpose(image, params, nuclear=None):
     # Tile batch size changes memory concurrency, not image resolution or weights.
     # The previous implicit default (8) spilled ~1.35 GiB into shared system RAM
     # on the 4 GiB T1200 under desktop load, causing minute-long inference.
+    # Batched bfloat16 kernels can round differently, so the batch actually used
+    # is recorded with the result.
+    recovery: list[str] = []
     with _INFERENCE_LOCK:
         tile_batch = _inference_tile_batch(use_gpu)
-        result = model.eval(stack, batch_size=tile_batch, **kwargs)
+        try:
+            result = model.eval(stack, batch_size=tile_batch, **kwargs)
+        except Exception as error:
+            if not (use_gpu and _is_out_of_memory(error)):
+                raise
+            result, tile_batch, use_gpu = _recover_from_oom(
+                model, stack, kwargs, tile_batch, params, recovery
+            )
     masks = np.asarray(result[0]).astype(np.int32)
 
     if scale < 1.0:
@@ -221,7 +237,51 @@ def segment_with_cellpose(image, params, nuclear=None):
         "nuclear_channel": params.nuclear_channel if nuclear is not None else None,
         "analysis_scale": scale,
         "parameters": params.describe(),
+        **({"oom_recovery": recovery} if recovery else {}),
     }
+
+
+def _is_out_of_memory(error: BaseException) -> bool:
+    try:
+        import torch
+
+        if isinstance(error, torch.cuda.OutOfMemoryError):
+            return True
+    except ImportError:
+        return False
+    return "out of memory" in str(error).lower()
+
+
+def _free_cuda_memory() -> None:
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception as error:     # freeing memory is best effort
+        print("CellScope: could not free CUDA memory: {}".format(error))
+
+
+def _recover_from_oom(model, stack, kwargs, tile_batch, params, recovery):
+    """Retry an out-of-memory inference: smaller tile batch, then the CPU.
+
+    Each step is recorded, because a CPU result is not bit-identical to a GPU
+    one and the export must say which ran.
+    """
+    _free_cuda_memory()
+    if tile_batch > 1:
+        recovery.append("CUDA out of memory at tile batch {}; retried with 1".format(tile_batch))
+        try:
+            return model.eval(stack, batch_size=1, **kwargs), 1, True
+        except Exception as error:
+            if not _is_out_of_memory(error):
+                raise
+            _free_cuda_memory()
+    recovery.append("CUDA out of memory; this image was segmented on the CPU")
+    cpu_model = _get_cellpose_model(params.model, False)
+    return cpu_model.eval(stack, batch_size=1, **kwargs), 1, False
 
 
 def _valid_scale(scale) -> float:
@@ -352,13 +412,16 @@ def segment_cells(image, params=None, engine: str = "auto", nuclear=None):
     if engine != "auto":
         raise ValueError("Unknown segmentation engine {!r}.".format(engine))
 
+    # "auto" falls back only when Cellpose cannot be used at all. A Cellpose
+    # failure on one image is reported as that image's error rather than
+    # silently replaced by a different algorithm.
     if cellpose_available():
         try:
             return segment_with_cellpose(image, params, nuclear)
-        except Exception as error:
+        except CellposeUnavailable as error:
             labels, info = segment_with_threshold_watershed(image, params)
             info["cellpose_error"] = "{}: {}".format(type(error).__name__, error)
-            info["note"] = "Cellpose failed; fell back to threshold+watershed"
+            info["note"] = "Cellpose could not be loaded; fell back to threshold+watershed"
             return labels, info
     return segment_with_threshold_watershed(image, params)
 

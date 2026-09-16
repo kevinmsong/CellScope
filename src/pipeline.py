@@ -13,6 +13,9 @@ for provenance.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import Any
@@ -44,6 +47,129 @@ class AnalysisResults:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass
+class PreparedImage:
+    """Stage 1 output: everything inference needs, captured from the session.
+
+    Settings are snapshotted here, so an edit made while the image waits for
+    the GPU cannot leak into the run, and the recorded provenance is exactly
+    what was used.
+    """
+
+    session: AnalysisSession
+    image: np.ndarray
+    nuclear: np.ndarray | None
+    preprocess_params: Any
+    segmentation_params: Any
+    split_params: Any
+    channel: str
+    fingerprint: str
+    pixels: np.ndarray | None
+    timings: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class SegmentationOutcome:
+    """Stage 3 output: the finished masks, not yet attached to the session."""
+
+    raw_labels: np.ndarray
+    object_labels: np.ndarray
+    objects: list[ObjectRecord]
+    annotation: Any
+    engine_info: dict[str, Any]
+    channel: str
+    fingerprint: str
+    params: tuple
+
+
+def prepare_segmentation(session: AnalysisSession, image_2d=None, nuclear_2d=None) -> PreparedImage:
+    """Read the channels and preprocess them. CPU only; touches no session state."""
+    from .image_io import extract_channel
+
+    started = perf_counter()
+    if image_2d is None:
+        if session.image is None:
+            raise ValueError("No image loaded.")
+        image_2d = extract_channel(session.image, session.channel)
+        nuclear_2d = nuclear_array_for(session)
+    params = session.preprocess_params
+    prepared = preprocess_image(image_2d, params)
+    prepared_nuclear = preprocess_image(nuclear_2d, params) if nuclear_2d is not None else None
+    return PreparedImage(
+        session=session,
+        image=prepared,
+        nuclear=prepared_nuclear,
+        preprocess_params=params,
+        segmentation_params=session.segmentation_params,
+        split_params=session.split_params,
+        channel=session.channel,
+        fingerprint=segmentation_fingerprint(session),
+        pixels=session.image.pixels if session.image is not None else None,
+        timings={"preprocessing": perf_counter() - started},
+    )
+
+
+def infer_segmentation(prepared: PreparedImage, engine: str = "auto"):
+    """Run the segmenter. The only stage that uses the GPU."""
+    started = perf_counter()
+    raw_labels, engine_info = segment_cells(
+        prepared.image, prepared.segmentation_params, engine=engine, nuclear=prepared.nuclear
+    )
+    prepared.timings["segmentation"] = perf_counter() - started
+    return raw_labels, engine_info
+
+
+def finalize_segmentation(prepared: PreparedImage, raw_labels, engine_info) -> SegmentationOutcome:
+    """Split touching cells and find burned-in annotations. CPU only."""
+    started = perf_counter()
+    object_labels, objects = split_touching_cells(
+        raw_labels, prepared.split_params, prepared.segmentation_params.min_object_area
+    )
+    # The annotation is found on the original image, never on the preprocessed
+    # channel, and its detection changes no pixel that is segmented or measured.
+    annotation = detect_annotation(prepared.pixels) if prepared.pixels is not None else None
+    objects = flag_annotation_contact(object_labels, objects, annotation)
+
+    raw_labels = np.asarray(raw_labels)
+    raw_labels.flags.writeable = False
+    object_labels.flags.writeable = False     # copy-on-write; see review.freeze_labels
+    prepared.timings["splitting"] = perf_counter() - started
+    timings = {key: round(value, 3) for key, value in prepared.timings.items()}
+    timings["total"] = round(sum(prepared.timings.values()), 3)
+    return SegmentationOutcome(
+        raw_labels=raw_labels,
+        object_labels=object_labels,
+        objects=objects,
+        annotation=annotation,
+        engine_info={**engine_info, "timings_seconds": timings},
+        channel=prepared.channel,
+        fingerprint=prepared.fingerprint,
+        params=(prepared.preprocess_params, prepared.segmentation_params, prepared.split_params),
+    )
+
+
+def commit_segmentation(session: AnalysisSession, outcome: SegmentationOutcome) -> AnalysisSession:
+    """Attach finished masks to the session and reset everything derived from them."""
+    session.raw_labels = outcome.raw_labels
+    session.object_labels = outcome.object_labels
+    session.objects = outcome.objects
+    session.annotation = outcome.annotation
+    session.engine_info = outcome.engine_info
+    session.qc.reset()
+    apply_automatic_qc(session.qc, outcome.objects, session.qc_params)
+    session.reviewed = False
+    session.undo_stack.clear()
+    session.redo_stack.clear()
+    session.correction_points.clear()
+    session.selected_object = 0
+    session.segmented_channel = outcome.channel
+    session.segmented_with = outcome.fingerprint
+    session.segmentation_version += 1
+    session.results_cache = None
+    session.error = ""
+    return session
+
+
 def run_segmentation(
     session: AnalysisSession, image_2d, engine: str = "auto", nuclear_2d=None
 ) -> AnalysisSession:
@@ -56,54 +182,9 @@ def run_segmentation(
     segmenter without ever being measured: morphology still comes from the
     chosen segmentation channel alone.
     """
-    started = perf_counter()
-    prepared = preprocess_image(image_2d, session.preprocess_params)
-    prepared_nuclear = (
-        preprocess_image(nuclear_2d, session.preprocess_params)
-        if nuclear_2d is not None
-        else None
-    )
-    prepared_at = perf_counter()
-    raw_labels, engine_info = segment_cells(
-        prepared, session.segmentation_params, engine=engine, nuclear=prepared_nuclear
-    )
-
-    segmented_at = perf_counter()
-    object_labels, objects = split_touching_cells(
-        raw_labels, session.split_params, session.segmentation_params.min_object_area
-    )
-
-    # The annotation is found on the original image, never on the preprocessed
-    # channel, and its detection changes no pixel that is segmented or measured.
-    annotation = detect_annotation(session.image.pixels) if session.image is not None else None
-    objects = flag_annotation_contact(object_labels, objects, annotation)
-
-    raw_labels = np.asarray(raw_labels)
-    raw_labels.flags.writeable = False
-    object_labels.flags.writeable = False     # copy-on-write; see review.freeze_labels
-    session.raw_labels = raw_labels
-    session.object_labels = object_labels
-    session.objects = objects
-    session.annotation = annotation
-    session.engine_info = {**engine_info, "timings_seconds": {
-        "preprocessing": round(prepared_at - started, 3),
-        "segmentation": round(segmented_at - prepared_at, 3),
-        "splitting": round(perf_counter() - segmented_at, 3),
-        "total": round(perf_counter() - started, 3),
-    }}
-    session.qc.reset()
-    apply_automatic_qc(session.qc, objects, session.qc_params)
-    session.reviewed = False
-    session.undo_stack.clear()
-    session.redo_stack.clear()
-    session.correction_points.clear()
-    session.selected_object = 0
-    session.segmented_channel = session.channel
-    session.segmented_with = segmentation_fingerprint(session)
-    session.segmentation_version += 1
-    session.results_cache = None
-    session.error = ""
-    return session
+    prepared = prepare_segmentation(session, image_2d, nuclear_2d)
+    raw_labels, engine_info = infer_segmentation(prepared, engine)
+    return commit_segmentation(session, finalize_segmentation(prepared, raw_labels, engine_info))
 
 
 def flag_annotation_contact(labels, objects, annotation) -> list[ObjectRecord]:
@@ -168,14 +249,9 @@ def nuclear_array_for(session: AnalysisSession):
 
 def segment_session(session: AnalysisSession, engine: str = "auto") -> AnalysisSession:
     """Segment one session from its own image and channel choices."""
-    from .image_io import extract_channel
-
-    if session.image is None:
-        raise ValueError("No image loaded.")
-    channel_image = extract_channel(session.image, session.channel)
-    return run_segmentation(
-        session, channel_image, engine=engine, nuclear_2d=nuclear_array_for(session)
-    )
+    prepared = prepare_segmentation(session)
+    raw_labels, engine_info = infer_segmentation(prepared, engine)
+    return commit_segmentation(session, finalize_segmentation(prepared, raw_labels, engine_info))
 
 
 def _batch_targets(batch, only_missing: bool):
@@ -192,43 +268,225 @@ def _batch_targets(batch, only_missing: bool):
     return targets, len(batch.images) - len(targets)
 
 
+#: CPU threads that prepare and finalize images around GPU inference. With
+#: Cellpose on a 4 GB card inference is >95% of the time, and the measured gain
+#: is small but real on large images; see docs/PERFORMANCE.md.
+DEFAULT_CPU_WORKERS = 2
+
+#: Weight of the latest image in the running per-image time used for the ETA.
+ETA_SMOOTHING = 0.3
+
+
+class BatchCancelled(Exception):
+    """Raised inside a stage when the run was cancelled."""
+
+
+class BatchReport(dict):
+    """The running tally of a batch run.
+
+    ``status`` lists ``[filename, state]`` per target image, in order. The
+    timing keys are measurements of this run, so two reports describing the
+    same outcome compare equal whatever their timings.
+    """
+
+    TIMING_KEYS = frozenset({"seconds_per_image", "eta_seconds", "elapsed_seconds"})
+
+    def _outcome(self):
+        return {k: v for k, v in self.items() if k not in self.TIMING_KEYS}
+
+    def __eq__(self, other):
+        if isinstance(other, BatchReport):
+            return self._outcome() == other._outcome()
+        return dict.__eq__(self, other)
+
+    __hash__ = None
+
+    def set_status(self, index: int, state: str) -> None:
+        self["status"][index][1] = state
+
+
+def _new_report(targets, skipped: int) -> BatchReport:
+    return BatchReport(
+        total=len(targets),
+        succeeded=0,
+        failed=[],
+        skipped=skipped,
+        cancelled=False,
+        status=[[s.display_name, "queued"] for s in targets],
+        seconds_per_image=None,
+        eta_seconds=None,
+        elapsed_seconds=0.0,
+    )
+
+
+def _record_failure(session: AnalysisSession, report, index: int, error: BaseException) -> None:
+    session.error = "{}: {}".format(type(error).__name__, error)
+    session.raw_labels = None
+    session.object_labels = None
+    session.objects = []
+    session.annotation = None
+    session.results_cache = None
+    report["failed"].append((session.display_name, session.error))
+    report.set_status(index, "failed")
+
+
 def iter_batch_segmentation(
-    batch, engine: str = "auto", only_missing: bool = False
+    batch, engine: str = "auto", only_missing: bool = False,
+    cancel: threading.Event | None = None, workers: int | None = None,
 ):
     """Segment a batch, yielding after each image.
 
     Yields ``(position, total, session, report)`` once per image actually run,
-    where ``report`` is the running tally. Yielding lets the interface show each
-    result as it lands, so the researcher can begin reviewing image 1 while the
-    rest are still on the GPU -- the only parallelism available here, since
-    inference is 95% of the cost and does not batch.
+    in input order, where ``report`` is the running tally with a per-image
+    ``status``, the smoothed seconds per image, and an ETA.
 
-    One image failing must not cost the other eleven: the error is recorded on
-    that image and reported, rather than raised. Cellpose weights are cached
-    module-level in ``src.segmentation``, so the model loads once for the whole
-    batch however many images it holds.
+    Stages are pipelined when ``workers`` > 0: while the GPU runs image *n*, a
+    CPU thread prepares image *n+1* and another finalizes image *n-1*. GPU
+    inference stays strictly serial, and results are committed on this thread
+    in input order under the batch lock, so what a run produces does not
+    depend on thread timing. At most three images are held in memory.
+
+    One image failing must not cost the rest: its error is recorded on that
+    image and reported. ``cancel`` stops the run between stages; images that
+    were already committed keep their results, and nothing is half-written.
 
     ``only_missing`` skips images that already carry a segmentation, so adding
     one field to a batch of twelve does not re-run the eleven already done.
     """
     targets, skipped = _batch_targets(batch, only_missing)
-    total = len(targets)
-    report: dict[str, Any] = {
-        "total": total, "succeeded": 0, "failed": [], "skipped": skipped,
-    }
+    report = _new_report(targets, skipped)
+    cancel = cancel or threading.Event()
+    workers = DEFAULT_CPU_WORKERS if workers is None else int(workers)
+    started = perf_counter()
+    last_commit = started
 
-    for position, session in enumerate(targets):
-        try:
-            segment_session(session, engine=engine)
-            report["succeeded"] += 1
-        except Exception as error:
-            session.error = "{}: {}".format(type(error).__name__, error)
-            session.raw_labels = None
-            session.object_labels = None
-            session.objects = []
-            session.results_cache = None
-            report["failed"].append((session.display_name, session.error))
-        yield position, total, session, report
+    def finished(position, session):
+        nonlocal last_commit
+        now = perf_counter()
+        spent, last_commit = now - last_commit, now
+        previous = report["seconds_per_image"]
+        report["seconds_per_image"] = (
+            spent if previous is None else ETA_SMOOTHING * spent + (1 - ETA_SMOOTHING) * previous
+        )
+        report["elapsed_seconds"] = now - started
+        report["eta_seconds"] = report["seconds_per_image"] * (len(targets) - position - 1)
+        return position, len(targets), session, report
+
+    if workers <= 0:
+        for position, session in enumerate(targets):
+            if cancel.is_set():
+                report["cancelled"] = True
+                break
+            report.set_status(position, "segmenting")
+            try:
+                with batch_lock(batch):
+                    prepared = prepare_segmentation(session)
+                raw, info = infer_segmentation(prepared, engine)
+                outcome = finalize_segmentation(prepared, raw, info)
+                with batch_lock(batch):
+                    commit_segmentation(session, outcome)
+                report["succeeded"] += 1
+                report.set_status(position, "done")
+            except Exception as error:
+                with batch_lock(batch):
+                    _record_failure(session, report, position, error)
+            yield finished(position, session)
+        return
+
+    cpu = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cellscope-cpu")
+    gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cellscope-gpu")
+
+    def guarded(stage, *args):
+        if cancel.is_set():
+            raise BatchCancelled()
+        return stage(*args)
+
+    def prepare(session):
+        # Reading settings must not race an edit on the interface thread.
+        with batch_lock(batch):
+            return prepare_segmentation(session)
+
+    prepared_futures: dict[int, Any] = {}
+    inference: tuple[int, Any] | None = None
+    finalizing: dict[int, Any] = {}
+    next_to_start = 0
+    next_to_commit = 0
+    try:
+        while next_to_commit < len(targets):
+            if cancel.is_set():
+                report["cancelled"] = True
+                break
+            # Keep one image prepared ahead of the GPU.
+            for index in (next_to_start, next_to_start + 1):
+                if index < len(targets) and index not in prepared_futures:
+                    prepared_futures[index] = cpu.submit(guarded, prepare, targets[index])
+            # Start inference on the next image once the GPU is free.
+            if inference is None and next_to_start < len(targets):
+                future = prepared_futures[next_to_start]
+                if future.done():
+                    report.set_status(next_to_start, "segmenting")
+                    if future.exception() is None:
+                        inference = (next_to_start, gpu.submit(
+                            guarded, infer_segmentation, future.result(), engine))
+                    else:
+                        finalizing[next_to_start] = future
+                    next_to_start += 1
+            # Hand a finished inference to a CPU thread for splitting.
+            if inference is not None and inference[1].done():
+                index, future = inference
+                inference = None
+                prepared = prepared_futures[index].result()
+                if future.exception() is None:
+                    report.set_status(index, "postprocessing")
+                    raw, info = future.result()
+                    finalizing[index] = cpu.submit(
+                        guarded, finalize_segmentation, prepared, raw, info)
+                else:
+                    finalizing[index] = future
+                continue
+            # Commit, in input order, whatever is ready.
+            ready = finalizing.get(next_to_commit)
+            if ready is not None and ready.done():
+                session = targets[next_to_commit]
+                del finalizing[next_to_commit]
+                prepared_futures.pop(next_to_commit, None)
+                error = ready.exception()
+                with batch_lock(batch):
+                    if error is None:
+                        commit_segmentation(session, ready.result())
+                        report["succeeded"] += 1
+                        report.set_status(next_to_commit, "done")
+                    elif isinstance(error, BatchCancelled):
+                        report["cancelled"] = True
+                        break
+                    else:
+                        _record_failure(session, report, next_to_commit, error)
+                yield finished(next_to_commit, session)
+                next_to_commit += 1
+                continue
+            waiting = [f for f in (
+                *prepared_futures.values(), *finalizing.values(),
+                *([inference[1]] if inference else []),
+            ) if not f.done()]
+            if waiting:
+                wait(waiting, timeout=0.25, return_when=FIRST_COMPLETED)
+    finally:
+        # Cancelled, finished, or abandoned by the caller: stop starting work.
+        # A running inference cannot be interrupted, but its result is never
+        # committed.
+        if next_to_commit < len(targets):
+            cancel.set()
+        cpu.shutdown(wait=False, cancel_futures=True)
+        gpu.shutdown(wait=False, cancel_futures=True)
+        for index in range(next_to_commit, len(targets)):
+            if report["status"][index][1] not in ("done", "failed"):
+                report.set_status(index, "cancelled")
+
+
+def batch_lock(batch):
+    """The batch's re-entrant lock, or a no-op for objects without one."""
+    getter = getattr(batch, "lock", None)
+    return getter() if callable(getter) else nullcontext()
 
 
 def run_batch_segmentation(
@@ -243,9 +501,7 @@ def run_batch_segmentation(
     # every image is skipped still reports the skip count -- the generator never
     # yields in that case and cannot report it itself.
     targets, skipped = _batch_targets(batch, only_missing)
-    report = {
-        "total": len(targets), "succeeded": 0, "failed": [], "skipped": skipped,
-    }
+    report = _new_report(targets, skipped)
     for position, total, session, report in iter_batch_segmentation(
         batch, engine=engine, only_missing=only_missing
     ):
