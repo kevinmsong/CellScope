@@ -53,6 +53,197 @@ def contact_graph_dataframe(edges) -> pd.DataFrame:
     return pd.DataFrame(list(edges), columns=["object_id_a", "object_id_b"])
 
 
+MANIFEST_SCHEMA = 1
+
+#: Distributions whose versions can change a result or its presentation.
+_DISTRIBUTIONS = (
+    "numpy", "scipy", "scikit-image", "pandas", "Pillow", "tifffile", "cellpose",
+    "torch", "gradio", "reportlab", "plotly",
+)
+
+
+def software_versions() -> dict[str, Any]:
+    """Versions of everything that took part in producing an export.
+
+    Read from package metadata, so nothing heavy (torch, gradio) is imported
+    just to report its version. CUDA details are included only when torch is
+    already loaded, which is exactly when it ran.
+    """
+    import importlib.metadata as metadata
+    import sys
+
+    versions: dict[str, Any] = {
+        "cellscope": __version__,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+    }
+    for name in _DISTRIBUTIONS:
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = None
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            versions["cuda"] = torch.version.cuda
+            versions["cuda_available"] = bool(torch.cuda.is_available())
+            if torch.cuda.is_available():
+                versions["gpu"] = torch.cuda.get_device_name(0)
+        except Exception as error:
+            versions["cuda"] = "unknown ({})".format(type(error).__name__)
+    return versions
+
+
+def _replace_file(source: str, target: str, attempts: int = 6) -> None:
+    """Move a finished archive into place, retrying while a sync client holds it."""
+    import time
+
+    delay = 0.05
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _zip_atomically(archive_path: str, members: list[tuple[str, str]]) -> None:
+    """Write ``(source, name)`` pairs to a zip that appears only when complete."""
+    directory = os.path.dirname(archive_path) or "."
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".cellscope-", suffix=".tmp")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            for source, name in members:
+                archive.write(source, name)
+        _replace_file(temporary, archive_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def image_provenance(session: AnalysisSession, results=None) -> dict[str, Any]:
+    """Everything needed to say how one image's numbers were produced."""
+    from .qc import exclusion_counts
+    from .workflow import is_stale
+
+    engine = dict(session.engine_info or {})
+    engine.pop("parameters", None)
+    return {
+        "filename": session.display_name,
+        "analysis_id": session.analysis_id,
+        "source_image": session.image.describe() if session.image else None,
+        "design": {"well": session.well, "condition": session.condition,
+                   "biological_replicate": session.replicate},
+        "channels": {
+            "segmented": session.segmented_channel,
+            "selected_now": session.channel,
+            "nuclear_guide": session.segmentation_params.nuclear_channel,
+            "nuclear_file": session.nuclear_image.describe() if session.nuclear_image else None,
+        },
+        "calibration": session.calibration.describe(),
+        "parameters": {
+            "preprocessing": session.preprocess_params.describe(),
+            "segmentation": session.segmentation_params.describe(),
+            "splitting": session.split_params.describe(),
+            "clustering": session.cluster_params.describe(),
+            "automatic_qc": session.qc_params.describe(),
+        },
+        "inference": engine,
+        "segmentation_fingerprint": session.segmented_with,
+        "settings_changed_since_segmentation": is_stale(session),
+        "burned_in_annotation": session.annotation.describe() if session.annotation else None,
+        "qc": {
+            "excluded_object_ids": sorted(session.qc.excluded_ids),
+            "exclusions_by_reason": exclusion_counts(session.objects, session.qc),
+            "logged_actions": len(session.qc.log),
+        },
+        "corrections": {"edits": len(session.edit_log),
+                        "operations": sorted({e.get("action", "") for e in session.edit_log})},
+        "review": {"reviewed": session.reviewed, "note": session.review_note,
+                   "signature": session.reviewed_signature or None},
+        "counts": results.counts if results is not None else None,
+        "error": session.error or None,
+    }
+
+
+def build_manifest(batch, per_image_dirs: dict[str, str], staging: str) -> dict[str, Any]:
+    """The machine-readable description of a batch archive (``manifest.json``)."""
+    from .batch import calibration_consistency
+    from .pipeline import compute_results
+    from .quality import AGGREGATION_RULE
+
+    verdict = calibration_consistency(batch)
+    files = []
+    for root, _, names in os.walk(staging):
+        for name in sorted(names):
+            full = os.path.join(root, name)
+            relative = os.path.relpath(full, staging).replace(os.sep, "/")
+            if relative == "manifest.json":
+                continue
+            files.append({"path": relative, "bytes": os.path.getsize(full), "sha256": _sha256(full)})
+    files.sort(key=lambda f: f["path"])
+    by_session = {v: k for k, v in per_image_dirs.items()}
+    images = []
+    for session in batch.images:
+        entry = image_provenance(
+            session, compute_results(session) if session.has_segmentation else None
+        )
+        entry["folder"] = by_session.get(session.analysis_id)
+        images.append(entry)
+    return {
+        "manifest_schema": MANIFEST_SCHEMA,
+        "generated_at": utc_now(),
+        "software": software_versions(),
+        "batch": {
+            "batch_id": batch.batch_id,
+            "label": batch.label,
+            "created_at": batch.created_at,
+            "n_images": len(batch.images),
+            "n_segmented": len(batch.segmented),
+            "n_reviewed": batch.n_reviewed,
+            "calibration_confirmed": batch.calibration_confirmed,
+            "units": "um" if verdict.get("calibrated") else "px",
+            "calibration_consistent": verdict["consistent"],
+        },
+        "statistics": {
+            "replicate_rule": AGGREGATION_RULE,
+            "pooled_summary_rule": (
+                "batch_summary.csv pools every accepted cell of every image; it is "
+                "descriptive and does not treat cells as replicates."
+            ),
+            "cluster_cell_counts": (
+                "A cluster containing any unresolved object has cell_count NA; "
+                "no count is inferred."
+            ),
+            "tests": "none",
+        },
+        "shared_parameters": {
+            "calibration": batch.calibration.describe(),
+            "preprocessing": batch.preprocess_params.describe(),
+            "segmentation": batch.segmentation_params.describe(),
+            "splitting": batch.split_params.describe(),
+            "clustering": batch.cluster_params.describe(),
+            "automatic_qc": batch.qc_params.describe(),
+        },
+        "images": images,
+        "files": files,
+    }
+
+
 def build_metadata(session: AnalysisSession, results) -> dict[str, Any]:
     """The full provenance record §18 asks for."""
     calibration = session.calibration
@@ -94,6 +285,7 @@ def build_metadata(session: AnalysisSession, results) -> dict[str, Any]:
             "numpy_version": np.__version__,
             "pandas_version": pd.__version__,
             "cellpose_version": cellpose_version(),
+            "versions": software_versions(),
         },
         "source_image": image.describe() if image else None,
         # The channel the masks came from, not whatever is selected now.
@@ -208,19 +400,15 @@ def export_analysis(
     """
     analysis_dir = os.path.join(output_dir, session.analysis_id)
     os.makedirs(analysis_dir, exist_ok=True)
-    staging = tempfile.mkdtemp(prefix="cellscope_stage_")
-    write_analysis_files(staging, session, results, overlay_rgb)
-
     archive_path = os.path.join(analysis_dir, filename)
-    try:
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for member in ARCHIVE_MEMBERS + ("nuclei_labels.tif", "nuclei_measurements.csv", "nuclei_metadata.json"):
-                source = os.path.join(staging, *member.split("/"))
-                if os.path.exists(source):
-                    archive.write(source, member)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-
+    with tempfile.TemporaryDirectory(prefix="cellscope_stage_") as staging:
+        write_analysis_files(staging, session, results, overlay_rgb)
+        members = []
+        for member in ARCHIVE_MEMBERS + ("nuclei_labels.tif", "nuclei_measurements.csv", "nuclei_metadata.json"):
+            source = os.path.join(staging, *member.split("/"))
+            if os.path.exists(source):
+                members.append((source, member))
+        _zip_atomically(archive_path, members)
     return archive_path
 
 
@@ -238,6 +426,8 @@ BATCH_MEMBERS = (
     "metadata.json",
     "nuclei_counts.csv", "readiness.csv", "well_summary.csv",
     "replicate_summary.csv", "condition_summary.csv", "report.pdf",
+    "design_images.csv", "design_wells.csv", "design_replicates.csv",
+    "design_conditions.csv", "manifest.json", "README.txt",
 )
 
 
@@ -258,9 +448,36 @@ def _unique_stem(filename: str, taken: set[str]) -> str:
     return candidate
 
 
+ARCHIVE_README = """CellScope batch analysis archive
+================================
+
+manifest.json           How every number was produced: software versions, device,
+                        parameters, calibration, QC and corrections per image, the
+                        statistical rules, and a SHA-256 for every file here.
+batch_summary.csv       All accepted cells pooled (descriptive; cells are not replicates).
+per_image_summary.csv   One row per image, for spotting an unusual field.
+all_cells.csv           Every accepted, resolved cell, tagged with image and well.
+all_clusters.csv        Every cluster. cell_count is NA when a cluster holds an
+                        object that could not be resolved into cells.
+design_*.csv            Image -> well -> biological replicate -> condition summaries
+                        of cell area. Condition n is the number of biological replicates.
+well/replicate/condition_summary.csv   The same hierarchy in the original layout.
+readiness.csv           Checks that were outstanding at export time.
+qc_log.csv              Every exclusion and restoration, with its reason.
+nuclei_counts.csv       Independent DAPI nuclear counts (not cell counts).
+report.pdf              A readable report of all of the above.
+images/<name>/          Per image: masks (raw and QC-approved), overlay, measurements,
+                        contact graph, edit log and metadata.json.
+
+Measurements are in um/um2 only when the image was calibrated, otherwise px/px2.
+Pixel and physical units are never mixed in one column.
+"""
+
+
 def build_batch_metadata(batch, per_image: dict[str, Any]) -> dict[str, Any]:
     """Provenance for the batch as a whole (§18, extended to many images)."""
     from .batch import calibration_consistency
+    from .quality import AGGREGATION_RULE
 
     verdict = calibration_consistency(batch)
     return {
@@ -269,6 +486,7 @@ def build_batch_metadata(batch, per_image: dict[str, Any]) -> dict[str, Any]:
         "created_at": batch.created_at,
         "exported_at": utc_now(),
         "software_version": __version__,
+        "software": software_versions(),
         "python_version": platform.python_version(),
         "cellpose_version": cellpose_version(),
         "n_images": len(batch.images),
@@ -291,6 +509,7 @@ def build_batch_metadata(batch, per_image: dict[str, Any]) -> dict[str, Any]:
                 "between conditions must use the well or sample as the "
                 "replicate unit; CellScope computes no such test."
             ),
+            "replicate_rule": AGGREGATION_RULE,
         },
         "shared_parameters": {
             "calibration": batch.calibration.describe(),
@@ -329,6 +548,7 @@ def export_batch(
     batch_dir = os.path.join(output_dir, batch.batch_id)
     os.makedirs(batch_dir, exist_ok=True)
     staging = tempfile.mkdtemp(prefix="cellscope_batch_")
+    folders: dict[str, str] = {}
 
     try:
         batch_summary(batch).to_csv(os.path.join(staging, "batch_summary.csv"), index=False)
@@ -340,11 +560,14 @@ def export_batch(
         batch_qc_log(batch).to_csv(os.path.join(staging, "qc_log.csv"), index=False)
 
         from .nuclei import batch_nuclear_counts
-        from .quality import experimental_summary, readiness
+        from .quality import design_summary, experimental_summary, readiness
         from .report import write_report
         readiness(batch).to_csv(os.path.join(staging, "readiness.csv"), index=False)
         for name, table in zip(("well", "replicate", "condition"), experimental_summary(batch)):
             table.to_csv(os.path.join(staging, name + "_summary.csv"), index=False)
+        design = design_summary(batch, "area")
+        for level in ("images", "wells", "replicates", "conditions"):
+            design[level].to_csv(os.path.join(staging, "design_{}.csv".format(level)), index=False)
         batch_nuclear_counts(batch).to_csv(os.path.join(staging, "nuclei_counts.csv"), index=False)
         write_report(batch, os.path.join(staging, "report.pdf"))
 
@@ -352,6 +575,7 @@ def export_batch(
         per_image: dict[str, Any] = {}
         for session, results in results_for(batch):
             stem = _unique_stem(session.display_name, taken)
+            folders["images/" + stem] = session.analysis_id
             write_analysis_files(
                 os.path.join(staging, "images", stem),
                 session,
@@ -385,6 +609,7 @@ def export_batch(
         for session in batch.images:
             if session.nuclei_labels is not None and not session.has_segmentation:
                 stem = _unique_stem(session.display_name, taken)
+                folders["images/" + stem] = session.analysis_id
                 write_nuclear_files(session, os.path.join(staging, "images", stem))
                 per_image[stem] = {"filename": session.display_name, "analysis_id": session.analysis_id,
                                    "well": session.well, "condition": session.condition,
@@ -393,17 +618,24 @@ def export_batch(
         with open(os.path.join(staging, "metadata.json"), "w", encoding="utf-8") as handle:
             json.dump(build_batch_metadata(batch, per_image), handle, indent=2, default=str)
 
+        with open(os.path.join(staging, "README.txt"), "w", encoding="utf-8") as handle:
+            handle.write(ARCHIVE_README)
+        with open(os.path.join(staging, "manifest.json"), "w", encoding="utf-8") as handle:
+            json.dump(build_manifest(batch, folders, staging), handle, indent=2, default=str)
+
         archive_path = os.path.join(batch_dir, filename)
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for member in BATCH_MEMBERS:
-                source = os.path.join(staging, member)
-                if os.path.exists(source):
-                    archive.write(source, member)
-            images_root = os.path.join(staging, "images")
-            for root, _, files in os.walk(images_root):
-                for name in sorted(files):
-                    full = os.path.join(root, name)
-                    archive.write(full, os.path.relpath(full, staging).replace(os.sep, "/"))
+        members = []
+        for member in BATCH_MEMBERS:
+            source = os.path.join(staging, member)
+            if os.path.exists(source):
+                members.append((source, member))
+        images_root = os.path.join(staging, "images")
+        for root, dirs, files in os.walk(images_root):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                members.append((full, os.path.relpath(full, staging).replace(os.sep, "/")))
+        _zip_atomically(archive_path, members)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

@@ -511,6 +511,60 @@ def cluster_size_figure(cluster_df, title=""):
     return _style(figure, "Cells per cluster", "Cluster count")
 
 
+def replicate_dot_plot(replicates, conditions, metric_label: str):
+    """One dot per biological replicate, with each condition's mean marked.
+
+    The dots are replicate means -- the unit a comparison rests on -- so the
+    plot shows the actual n for each condition. Cells are deliberately absent.
+    """
+    import plotly.graph_objects as go
+
+    if replicates is None or not len(replicates):
+        return _blank_figure("Assign wells, conditions and biological replicates to compare")
+    figure = go.Figure()
+    units = sorted(set(replicates["unit"]))
+    for unit in units:
+        subset = replicates[replicates["unit"] == unit]
+        suffix = "" if unit == "ratio" else " ({})".format(unit)
+        order = sorted(set(subset["condition"]))
+        position = {name: i for i, name in enumerate(order)}
+        rng = np.random.default_rng(0)
+        jitter = rng.uniform(-0.12, 0.12, len(subset))
+        figure.add_trace(go.Scatter(
+            x=[position[c] + j for c, j in zip(subset["condition"], jitter)],
+            y=subset["mean"],
+            mode="markers",
+            name="Replicate mean" + suffix,
+            marker=dict(color=PLOT_COLOURS["isolated"], size=11, symbol="circle",
+                        line=dict(width=2, color=PLOT_SURFACE)),
+            customdata=np.stack([subset["condition"], subset["biological_replicate"],
+                                 subset["wells"], subset["cells"]], axis=1),
+            hovertemplate=("%{customdata[0]} · replicate %{customdata[1]}<br>"
+                           + metric_label + " %{y:.4g}" + suffix
+                           + "<br>%{customdata[2]} well(s), %{customdata[3]} cells<extra></extra>"),
+        ))
+        means = conditions[conditions["unit"] == unit] if conditions is not None else None
+        if means is not None and len(means):
+            figure.add_trace(go.Scatter(
+                x=[position[c] for c in means["condition"]],
+                y=means["mean"],
+                mode="markers",
+                name="Condition mean (n = replicates)",
+                marker=dict(color=PLOT_TEXT, size=26, symbol="line-ew-open", line=dict(width=3)),
+                customdata=np.stack([means["condition"], means["biological_replicates"]], axis=1),
+                hovertemplate=("%{customdata[0]}: mean of %{customdata[1]} replicate(s) "
+                               "%{y:.4g}<extra></extra>"),
+            ))
+        figure.update_xaxes(tickmode="array", tickvals=list(position.values()),
+                            ticktext=["{} (n={})".format(
+                                c, int((subset["condition"] == c).sum())) for c in order])
+    figure.update_layout(title="{} by biological replicate".format(metric_label))
+    unit_text = units[0] if len(units) == 1 and units[0] != "ratio" else ""
+    return _style(figure, "Condition",
+                  metric_label + (" ({})".format(unit_text) if unit_text else ""),
+                  show_legend=True)
+
+
 def build_all_figures(cell_df, cluster_df, calibration):
     """The five figures §15 asks for, labelled in whatever units are in force."""
     from .calibration import area_label, length_label

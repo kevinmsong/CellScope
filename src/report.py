@@ -17,10 +17,57 @@ from reportlab.platypus import (
 )
 
 from . import __version__
+from .batch import calibration_consistency
 from .image_io import make_display
 from .pipeline import compute_results
-from .quality import experimental_summary, readiness
+from .qc import exclusion_counts
+from .quality import AGGREGATION_RULE, design_summary, readiness
+from .types import utc_now
 from .visualize import make_overlay
+from .workflow import is_stale
+
+
+def _dot_plot(replicates, conditions, width=468, height=170):
+    """Replicate means per condition, drawn directly with ReportLab graphics."""
+    from reportlab.graphics.shapes import Circle, Drawing, Line, String
+
+    drawing = Drawing(width, height)
+    frame = replicates[replicates["unit"] == replicates["unit"].iloc[0]]
+    means = conditions[conditions["unit"] == frame["unit"].iloc[0]]
+    order = sorted(set(frame["condition"]))
+    values = list(frame["mean"].dropna())
+    if not values:
+        return drawing
+    low, high = min(values), max(values)
+    span = (high - low) or abs(high) or 1.0
+    low, high = low - 0.1 * span, high + 0.1 * span
+    left, bottom, top = 50, 30, height - 20
+    step = (width - left - 10) / max(len(order), 1)
+
+    def y(value):
+        return bottom + (value - low) / (high - low) * (top - bottom)
+
+    drawing.add(Line(left, bottom, left, top, strokeColor=colors.grey))
+    for fraction in (0.0, 0.5, 1.0):
+        value = low + fraction * (high - low)
+        drawing.add(String(4, y(value) - 3, "{:.3g}".format(value), fontSize=7))
+    for index, condition in enumerate(order):
+        centre = left + step * (index + 0.5)
+        subset = frame[frame["condition"] == condition]["mean"].dropna()
+        for k, value in enumerate(subset):
+            offset = (k - (len(subset) - 1) / 2) * 6
+            drawing.add(Circle(centre + offset, y(value), 3,
+                               fillColor=colors.HexColor("#1f5fb0"), strokeColor=colors.white))
+        mean = means[means["condition"] == condition]["mean"]
+        if len(mean) and pd.notna(mean.iloc[0]):
+            drawing.add(Line(centre - 18, y(mean.iloc[0]), centre + 18, y(mean.iloc[0]),
+                             strokeColor=colors.black, strokeWidth=2))
+        drawing.add(String(centre, 12, "{} (n={})".format(condition, len(subset)),
+                           fontSize=7, textAnchor="middle"))
+    unit = frame["unit"].iloc[0]
+    drawing.add(String(left, height - 10, "Replicate mean cell area ({}); bar = condition mean".format(unit),
+                       fontSize=8))
+    return drawing
 
 
 def write_report(batch, path):
@@ -47,12 +94,53 @@ def write_report(batch, path):
         story.append(Spacer(1, 12))
     paragraph("CellScope analysis report", "Title")
     paragraph(batch.label or "Untitled experiment", "Heading2")
-    paragraph(f"Software {__version__} | Batch {batch.batch_id}")
+    paragraph(f"Software {__version__} | Batch {batch.batch_id} | Generated {utc_now()}")
+
+    paragraph("Status", "Heading2")
+    verdict = calibration_consistency(batch)
+    segmented = [s for s in batch.images if s.has_segmentation]
+    stale = [s.display_name for s in segmented if is_stale(s)]
+    paragraph(
+        f"{len(batch.images)} image(s); {len(segmented)} segmented; "
+        f"{batch.n_reviewed} reviewed. Calibration: "
+        + (batch.calibration.summary() if verdict["consistent"] else verdict["reason"])
+    )
+    if stale:
+        paragraph("Settings changed after segmentation for: " + ", ".join(stale)
+                  + ". Their masks reflect the earlier settings recorded in manifest.json.")
+    excluded = {"excluded_border": 0, "excluded_annotation": 0, "excluded_other": 0}
+    for s in segmented:
+        for key, value in exclusion_counts(s.objects, s.qc).items():
+            excluded[key] += value
+    paragraph(
+        "Excluded objects: {excluded_border} touching the image border, "
+        "{excluded_annotation} touching a burned-in scale bar, {excluded_other} by "
+        "review or filters.".format(**excluded)
+    )
+
     paragraph("Readiness checks", "Heading2")
     table(readiness(batch))
     paragraph("Experimental comparisons", "Heading2")
-    paragraph("Fields are pooled within a well; wells are averaged within each biological replicate. Condition means and standard deviations use replicate means, not individual cells. Missing design labels are omitted. No p-values are calculated.")
-    table(experimental_summary(batch)[2].round(3))
+    paragraph(AGGREGATION_RULE + " Missing design labels are omitted, not guessed.")
+    design = design_summary(batch, "area")
+    if len(design["conditions"]):
+        conditions = design["conditions"][["condition", "unit", "biological_replicates", "wells",
+                                           "cells", "mean", "sd_between_replicates"]]
+        table(conditions.round(3))
+        story.append(_dot_plot(design["replicates"], design["conditions"]))
+        story.append(Spacer(1, 10))
+        paragraph("Biological replicates", "Heading3")
+        table(design["replicates"][["condition", "biological_replicate", "unit", "wells",
+                                    "cells", "mean", "sd_between_wells"]].round(3))
+        paragraph("Wells", "Heading3")
+        table(design["wells"][["condition", "biological_replicate", "well", "unit", "fields",
+                               "cells", "mean", "median"]].round(3))
+    else:
+        paragraph("No image has a complete well, condition and biological replicate "
+                  "assignment yet, so no comparison is shown.")
+    if len(design["unassigned"]):
+        paragraph("Not in the comparison: " + ", ".join(
+            "{} ({})".format(r.image, r.reason) for r in design["unassigned"].itertuples()))
     from .nuclei import batch_nuclear_counts
     paragraph("Independent DAPI nuclei counts", "Heading2")
     nuclei = batch_nuclear_counts(batch)
@@ -72,8 +160,12 @@ def write_report(batch, path):
             continue
         results = compute_results(s)
         paragraph(f"Accepted cells: {results.counts['cells_accepted']} | Excluded objects: {results.counts['objects_excluded']} | Unresolved objects: {results.counts['unresolved_accepted']}")
+        if s.annotation is not None and s.annotation.found:
+            paragraph("Burned-in scale bar detected: " + s.annotation.note
+                      + ". Objects touching it are excluded (dotted outline).")
         display, _ = make_display(s.image)
-        overlay = make_overlay(display, results.qc_labels, results.objects, results.clusters)
+        overlay = make_overlay(display, results.qc_labels, results.objects, results.clusters,
+                               excluded_ids=s.qc.excluded_ids, annotation=s.annotation)
         buffer = BytesIO()
         PILImage.fromarray(overlay).save(buffer, format="PNG")
         buffer.seek(0)
@@ -95,8 +187,11 @@ def write_report(batch, path):
         paragraph("Recorded settings", "Heading2")
         if s.nuclei_settings:
             paragraph("Independent nuclear settings: " + str(s.nuclei_settings))
-        for name in ("preprocess_params", "segmentation_params", "split_params", "cluster_params"):
+        for name in ("preprocess_params", "segmentation_params", "split_params",
+                     "cluster_params", "qc_params"):
             paragraph(name + ": " + str(getattr(s, name).describe()))
+        engine = {k: v for k, v in (s.engine_info or {}).items() if k != "parameters"}
+        paragraph("Inference: " + str(engine))
         paragraph("QC history", "Heading2")
         if not s.qc.log and not s.edit_log:
             paragraph("No manual corrections or exclusions recorded.")
